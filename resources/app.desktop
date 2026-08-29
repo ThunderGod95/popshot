@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Popshot
+Comment=Screenshot utility for CosmicDE.
+Type=Application
+Icon=io.github.tg.PopShot
+Exec=popshot %F
+Terminal=false
+StartupNotify=true
+Categories=COSMIC
+Keywords=COSMIC
+MimeType=

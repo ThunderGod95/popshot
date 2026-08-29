@@ -1,0 +1,29 @@
+[package]
+name = "popshot"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "Screenshot utility for CosmicDE."
+repository = "https://github.com/ThunderGod95/popshot"
+
+[dependencies]
+i18n-embed = { version = "0.16", features = [
+    "fluent-system",
+    "desktop-requester",
+] }
+i18n-embed-fl = "0.10"
+rust-embed = "8.8.0"
+tokio = { version = "1.48.0", features = ["full"] }
+ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+wayland-client = "0.31.15"
+
+[build-dependencies]
+xdgen = "0.1"
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic.git"
+features = [
+    "single-instance",
+    "wgpu",
+]
