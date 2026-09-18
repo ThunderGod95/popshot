@@ -70,7 +70,11 @@ input so Escape works even when another app was focused.
 `output_selection.rs` contains the capture modes and rectangle input/rendering.
 Selections use normalized image bounds so logical desktop coordinates map to the
 original pixel resolution, including fractional scaling. The toolbar uses the mode's
-availability flag; Window and Freehand are deliberately disabled until implemented.
+availability flag; Window and Freehand are hidden until implemented.
+`ui.rs` separates the floating toolbar, preview actions, image canvas and status bar.
+The preview follows the desktop theme and never enlarges small captures. Keyboard
+shortcuts are shown in tooltips; technical error details are available by hovering
+over an error in the status bar.
 
 To add window capture, obtain window bounds from a compositor-supported backend and
 feed normalized bounds into the existing crop/preview path. The screenshot portal

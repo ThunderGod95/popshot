@@ -1,0 +1,290 @@
+use cosmic::{
+    Element, Theme,
+    iced::{Alignment, Border, Color, ContentFit, Length, Shadow, Vector, widget::Stack},
+    widget::{self, image::Handle},
+};
+
+use crate::{
+    app::Message,
+    output_selection::{CaptureMode, OutputSelection},
+};
+
+fn icon(name: &'static str) -> widget::icon::Handle {
+    widget::icon::from_name(name).size(20).handle()
+}
+
+/// A floating surface follows the desktop theme, with enough separation from any wallpaper.
+fn floating_surface(theme: &Theme) -> widget::container::Style {
+    let mut style = cosmic::theme::Container::background(theme.cosmic(), false);
+    style.border = Border {
+        radius: 16.0.into(),
+        width: 1.0,
+        color: theme.cosmic().background(false).component.divider.into(),
+    };
+    style.shadow = Shadow {
+        color: Color::from_rgba(0.0, 0.0, 0.0, 0.28),
+        offset: Vector::new(0.0, 8.0),
+        blur_radius: 28.0,
+    };
+    style
+}
+
+pub fn selection<'a>(handle: &Handle, dragging: bool, status: &'a str) -> Element<'a, Message> {
+    let screenshot = widget::image(handle.clone())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .content_fit(ContentFit::Fill);
+    let selector = Element::new(OutputSelection {
+        on_select: Message::Select,
+        on_drag: Message::Drag,
+    });
+    let mut layers = vec![screenshot.into(), selector];
+    if !dragging {
+        layers.push(
+            widget::container(snipping_toolbar(status))
+                .center_x(Length::Fill)
+                .padding(24)
+                .into(),
+        );
+    }
+    Stack::with_children(layers)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn snipping_toolbar(status: &str) -> Element<'_, Message> {
+    let mut modes = widget::row([]).spacing(6).align_y(Alignment::Center);
+
+    for mode in CaptureMode::ALL.into_iter().filter(|mode| mode.available()) {
+        let (symbol, tip) = match mode {
+            CaptureMode::Rectangle => ("screenshot-selection-symbolic", "Rectangle · R"),
+            CaptureMode::Fullscreen => ("screenshot-screen-symbolic", "Capture full screen · F"),
+            _ => continue,
+        };
+
+        let button = widget::button::icon(icon(symbol))
+            .label(mode.label())
+            .selected(mode == CaptureMode::Rectangle)
+            .class(if mode == CaptureMode::Rectangle {
+                cosmic::theme::Button::Suggested
+            } else {
+                cosmic::theme::Button::Icon
+            })
+            .padding([10, 14])
+            .on_press(Message::Mode(mode));
+
+        modes = modes.push(
+            widget::tooltip(
+                button,
+                widget::text(tip).size(13),
+                widget::tooltip::Position::Bottom,
+            )
+            .gap(8),
+        );
+    }
+
+    let cancel = widget::tooltip(
+        widget::button::icon(icon("window-close-symbolic"))
+            .padding(10)
+            .on_press(Message::Cancel),
+        widget::text("Cancel · Esc").size(13),
+        widget::tooltip::Position::Bottom,
+    )
+    .gap(8);
+
+    let controls = modes
+        .push(widget::space().width(8))
+        .push(widget::container(widget::divider::vertical::default()).height(24))
+        .push(cancel);
+
+    let hint = if status.is_empty() {
+        "Drag to capture an area"
+    } else {
+        status
+    };
+
+    widget::column([
+        widget::container(controls)
+            .padding(8)
+            .style(floating_surface)
+            .into(),
+        widget::container(widget::text(hint).size(13))
+            .padding([6, 12])
+            .style(floating_surface)
+            .into(),
+    ])
+    .spacing(12)
+    .align_x(Alignment::Center)
+    .into()
+}
+
+pub fn preview<'a>(
+    handle: Option<&Handle>,
+    dimensions: Option<(u32, u32)>,
+    busy: bool,
+    status: &'a str,
+    detail: Option<&'a str>,
+) -> Element<'a, Message> {
+    widget::container(widget::column([
+        preview_actions(handle.is_some(), busy),
+        widget::divider::horizontal::default().into(),
+        preview_canvas(handle),
+        widget::divider::horizontal::default().into(),
+        status_bar(dimensions, busy, status, detail),
+    ]))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(preview_background)
+    .into()
+}
+
+fn preview_background(theme: &Theme) -> widget::container::Style {
+    let mut style = cosmic::theme::Container::background(theme.cosmic(), false);
+
+    style.background = Some(theme.cosmic().background(false).component.base.into());
+    style.border = Border::default();
+
+    style
+}
+
+fn preview_actions(has_image: bool, busy: bool) -> Element<'static, Message> {
+    let title = widget::row([
+        widget::icon(icon("accessories-screenshot-symbolic"))
+            .size(24)
+            .into(),
+        widget::text::heading("Screenshot").into(),
+    ])
+    .spacing(12)
+    .align_y(Alignment::Center);
+
+    let copy = widget::tooltip(
+        widget::button::standard("Copy")
+            .leading_icon(icon("edit-copy-symbolic"))
+            .on_press_maybe((has_image && !busy).then_some(Message::Copy)),
+        widget::text("Copy image · Ctrl+C").size(13),
+        widget::tooltip::Position::Bottom,
+    )
+    .gap(8);
+
+    let save = widget::tooltip(
+        widget::button::suggested("Save as…")
+            .leading_icon(icon("document-save-as-symbolic"))
+            .on_press_maybe((has_image && !busy).then_some(Message::Save)),
+        widget::text("Save image · Ctrl+S").size(13),
+        widget::tooltip::Position::Bottom,
+    )
+    .gap(8);
+
+    let actions = widget::row([
+        title.into(),
+        widget::space().width(Length::Fill).into(),
+        copy.into(),
+        save.into(),
+    ])
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    widget::container(actions).padding([16, 20]).into()
+}
+
+fn preview_canvas(handle: Option<&Handle>) -> Element<'static, Message> {
+    let content: Element<'static, Message> = match handle {
+        Some(handle) => widget::container(
+            widget::container(widget::image(handle.clone()).content_fit(ContentFit::ScaleDown))
+                .style(|theme: &Theme| widget::container::Style {
+                    border: Border {
+                        width: 1.0,
+                        color: theme.cosmic().background(false).component.divider.into(),
+                        ..Default::default()
+                    },
+                    shadow: Shadow {
+                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
+                        offset: Vector::new(0.0, 4.0),
+                        blur_radius: 16.0,
+                    },
+                    ..Default::default()
+                }),
+        )
+        .center(Length::Fill)
+        .into(),
+
+        None => widget::container(
+            widget::column([
+                widget::icon(icon("accessories-screenshot-symbolic"))
+                    .size(48)
+                    .into(),
+                widget::text::title3("Screenshot unavailable").into(),
+                widget::text("Please close this window and try again.").into(),
+            ])
+            .spacing(12)
+            .align_x(Alignment::Center),
+        )
+        .center(Length::Fill)
+        .into(),
+    };
+
+    widget::container(content)
+        .padding(32)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|theme: &Theme| {
+            let mut style = cosmic::theme::Container::background(theme.cosmic(), false);
+
+            style.background = Some(theme.cosmic().background(false).component.base.into());
+            style.border = Border::default();
+
+            style
+        })
+        .into()
+}
+
+fn status_bar<'a>(
+    dimensions: Option<(u32, u32)>,
+    busy: bool,
+    status: &'a str,
+    detail: Option<&'a str>,
+) -> Element<'a, Message> {
+    let symbol = if detail.is_some() {
+        "dialog-warning-symbolic"
+    } else if busy {
+        "content-loading-symbolic"
+    } else if status == "Copied to clipboard" || status == "Screenshot saved" {
+        "object-select-symbolic"
+    } else {
+        "dialog-information-symbolic"
+    };
+
+    let feedback = widget::row([
+        widget::icon(icon(symbol)).size(16).into(),
+        widget::text(status).size(13).into(),
+    ])
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let feedback: Element<'_, Message> = if let Some(detail) = detail {
+        widget::tooltip(
+            feedback,
+            widget::container(widget::text(detail).size(13)).max_width(440),
+            widget::tooltip::Position::Top,
+        )
+        .into()
+    } else {
+        feedback.into()
+    };
+
+    let metadata = dimensions
+        .map(|(width, height)| format!("{width} × {height}  ·  PNG"))
+        .unwrap_or_default();
+
+    widget::container(
+        widget::row([
+            widget::container(feedback).width(Length::Fill).into(),
+            widget::text(metadata).size(12).into(),
+        ])
+        .spacing(24)
+        .align_y(Alignment::Center),
+    )
+    .padding([12, 20])
+    .into()
+}

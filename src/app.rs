@@ -1,12 +1,11 @@
 use crate::{
     capture::{self, CapturedImage},
-    output_selection::{CaptureMode, OutputSelection},
+    output_selection::CaptureMode,
 };
 use cosmic::{
     iced::{
-        self, ContentFit, Event, Length, Subscription,
+        self, Event, Subscription,
         keyboard::{self, Key, key::Named},
-        widget::Stack,
         window,
     },
     prelude::*,
@@ -23,6 +22,7 @@ pub struct AppModel {
     dragging: bool,
     busy: bool,
     status: String,
+    status_detail: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +41,8 @@ pub enum Message {
 impl AppModel {
     fn open_preview(&mut self) -> Task<cosmic::Action<Message>> {
         let (_, task) = window::open(window::Settings {
-            size: iced::Size::new(960.0, 640.0),
+            size: iced::Size::new(1040.0, 720.0),
+            min_size: Some(iced::Size::new(560.0, 360.0)),
             exit_on_close_request: false,
             ..Default::default()
         });
@@ -90,20 +91,22 @@ impl AppModel {
         let Some(image) = &self.result else {
             return Task::none();
         };
-        
+
         if self.busy {
             return Task::none();
         }
-        
+
         self.busy = true;
-        
+        self.status = "Copying image…".into();
+        self.status_detail = None;
+
         let png = image.png.clone();
-        
+
         cosmic::task::future(async move {
             cosmic::Action::App(Message::Done(
                 crate::clipboard::copy_png(&png)
                     .await
-                    .map(|()| "Screenshot copied to clipboard".into()),
+                    .map(|()| "Copied to clipboard".into()),
             ))
         })
     }
@@ -113,17 +116,17 @@ impl cosmic::Application for AppModel {
     type Executor = cosmic::executor::Default;
     type Flags = ();
     type Message = Message;
-    
+
     const APP_ID: &'static str = "io.github.tg.PopShot";
-    
+
     fn core(&self) -> &cosmic::Core {
         &self.core
     }
-    
+
     fn core_mut(&mut self) -> &mut cosmic::Core {
         &mut self.core
     }
-    
+
     fn init(core: cosmic::Core, _: ()) -> (Self, Task<cosmic::Action<Message>>) {
         (
             Self {
@@ -136,101 +139,37 @@ impl cosmic::Application for AppModel {
                 dragging: false,
                 busy: false,
                 status: String::new(),
+                status_detail: None,
             },
             cosmic::task::future(async {
                 cosmic::Action::App(Message::Captured(capture::capture_desktop().await))
             }),
         )
     }
-    
+
     fn view(&self) -> Element<'_, Message> {
         widget::space().into()
     }
-    
+
     fn view_window(&self, id: window::Id) -> Element<'_, Message> {
-        if id == self.overlay && self.selecting {
-            let screenshot = widget::image(self.handle.clone().unwrap())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .content_fit(ContentFit::Fill);
-            
-            let selector = Element::new(OutputSelection {
-                on_select: Message::Select,
-                on_drag: Message::Drag,
-            });
+        if id == self.overlay
+            && self.selecting
+            && let Some(handle) = &self.handle
+        {
+            return crate::ui::selection(handle, self.dragging, &self.status);
+        }
 
-            let mut layers = vec![screenshot.into(), selector];
-
-            if !self.dragging {
-                let mut modes = widget::row([]).spacing(6);
-                for mode in CaptureMode::ALL {
-                    let button = if mode == CaptureMode::Rectangle {
-                        widget::button::suggested(mode.label())
-                    } else {
-                        widget::button::standard(mode.label())
-                    };
-                    modes = modes.push(
-                        button.on_press_maybe(mode.available().then_some(Message::Mode(mode))),
-                    );
-                }
-                modes =
-                    modes.push(widget::button::standard("Close · Esc").on_press(Message::Cancel));
-                let toolbar = widget::container(widget::column([]).spacing(8).push(modes).push(
-                    widget::text(if self.status.is_empty() {
-                        "Drag to snip a rectangle · R Rectangle · F Fullscreen"
-                    } else {
-                        &self.status
-                    }),
-                ))
-                .padding(12)
-                .class(cosmic::theme::Container::Card);
-                layers.push(
-                    widget::container(toolbar)
-                        .width(Length::Fill)
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .padding(16)
-                        .into(),
-                );
-            }
-            return Stack::with_children(layers)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into();
-        }
-        let buttons = widget::row([])
-            .spacing(8)
-            .push(widget::text::title3("Popshot"))
-            .push(widget::space().width(Length::Fill))
-            .push(
-                widget::button::standard("Copy · Ctrl+C")
-                    .on_press_maybe((self.result.is_some() && !self.busy).then_some(Message::Copy)),
-            )
-            .push(
-                widget::button::suggested("Save as… · Ctrl+S")
-                    .on_press_maybe((self.result.is_some() && !self.busy).then_some(Message::Save)),
-            )
-            .push(widget::button::standard("Close").on_press(Message::Cancel));
-        let mut content = widget::column([]).spacing(16).push(buttons);
-        if let Some(image) = &self.result {
-            content = content.push(widget::text(format!(
-                "{} × {} pixels",
-                image.width, image.height
-            )));
-        }
-        if let Some(handle) = &self.handle {
-            content = content.push(
-                widget::image(handle.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .content_fit(ContentFit::Contain),
-            );
-        }
-        widget::container(content.push(widget::text(&self.status)))
-            .padding(20)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        crate::ui::preview(
+            self.handle.as_ref(),
+            self.result
+                .as_ref()
+                .map(|image| (image.width, image.height)),
+            self.busy,
+            &self.status,
+            self.status_detail.as_deref(),
+        )
     }
+
     fn subscription(&self) -> Subscription<Message> {
         iced::event::listen_with(|event, status, _| match event {
             Event::Window(window::Event::CloseRequested) => Some(Message::Cancel),
@@ -252,7 +191,7 @@ impl cosmic::Application for AppModel {
             _ => None,
         })
     }
-    
+
     fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
         match message {
             Message::Captured(Ok(image)) => {
@@ -263,36 +202,100 @@ impl cosmic::Application for AppModel {
                 ));
                 self.source = Some(image);
                 self.selecting = true;
+
                 return crate::overlay::open(self.overlay);
             }
+
             Message::Captured(Err(error)) => {
-                self.status = format!("Capture failed: {error}");
+                self.status = "Couldn’t take a screenshot. Please try again.".into();
+                self.status_detail = Some(error);
                 return self.open_preview();
             }
+
             Message::Mode(CaptureMode::Fullscreen) if !self.dragging => return self.finish(None),
+
             Message::Select(region) => return self.finish(Some(region)),
+
             Message::Drag(dragging) => self.dragging = dragging,
+
             Message::Copy => return self.copy(),
+
             Message::Save if !self.busy => {
                 if let Some(image) = &self.result {
                     self.busy = true;
+                    self.status = "Saving image…".into();
+                    self.status_detail = None;
+
                     let png = image.png.clone();
+
                     return cosmic::task::future(async move {
                         cosmic::Action::App(Message::Done(capture::save(&png).await))
                     });
                 }
             }
+
             Message::Done(result) => {
                 self.busy = false;
-                self.status = result
-                    .unwrap_or_else(|error| format!("{error}. You can retry or save the image."));
+                match result {
+                    Ok(status) => {
+                        self.status = if status.starts_with("Saved to ") {
+                            "Screenshot saved".into()
+                        } else {
+                            status
+                        };
+                        self.status_detail = None;
+                    }
+                    Err(error) => {
+                        self.status = "Couldn’t finish. Try again; your screenshot is safe.".into();
+                        self.status_detail = Some(error);
+                    }
+                }
             }
+
             Message::Cancel => return iced::exit(),
+
             Message::Opened(id) => {
                 return self.set_window_title("Popshot — Snipping Tool".into(), id);
             }
+
             _ => {}
         }
+
         Task::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmic::Application;
+
+    #[test]
+    fn failed_output_keeps_capture_and_retry_clears_error() {
+        let (mut app, _) = AppModel::init(cosmic::Core::default(), ());
+        app.result = Some(CapturedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4].into(),
+            png: vec![1, 2, 3].into(),
+        });
+        app.busy = true;
+        let _ = app.update(Message::Done(Err("backend error".into())));
+        assert!(!app.busy);
+        assert!(app.result.is_some());
+        assert_eq!(app.status_detail.as_deref(), Some("backend error"));
+        assert!(!app.status.contains("backend error"));
+        let _ = app.update(Message::Copy);
+        assert!(app.busy);
+        assert!(app.status_detail.is_none());
+        let _ = app.update(Message::Done(Ok("Copied to clipboard".into())));
+        assert!(!app.busy);
+        assert_eq!(app.status, "Copied to clipboard");
+        let _ = app.update(Message::Done(Ok("Saved to /tmp/Screenshot.png".into())));
+        assert_eq!(app.status, "Screenshot saved");
+        let _ = app.update(Message::Done(Ok("Save cancelled".into())));
+        assert_eq!(app.status, "Save cancelled");
+        assert!(app.status_detail.is_none());
+        assert!(app.result.is_some());
     }
 }

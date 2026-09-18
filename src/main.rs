@@ -6,6 +6,7 @@ mod clipboard;
 mod i18n;
 mod output_selection;
 mod overlay;
+mod ui;
 
 fn main() -> cosmic::iced::Result {
     let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
