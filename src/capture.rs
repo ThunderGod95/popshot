@@ -7,7 +7,7 @@ use image::ImageFormat;
 pub struct CapturedImage {
     pub width: u32,
     pub height: u32,
-    /// Original PMG returned bu the screenshot portal.
+    /// Original PNG returned by the screenshot portal.
     pub png: Arc<[u8]>,
     /// Decoded RGBA image for rendering/editing.
     pub rgba: Arc<[u8]>,
@@ -54,4 +54,119 @@ pub async fn capture_desktop() -> Result<CapturedImage, String> {
         png: Arc::from(png),
         rgba: Arc::from(image.into_raw()),
     })
+}
+
+/// All selectors produce image-space bounds; freehand can additionally apply a mask here.
+pub fn crop(source: &CapturedImage, region: [f32; 4]) -> Result<CapturedImage, String> {
+    if region
+        .iter()
+        .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+    {
+        return Err("Selection is outside the screenshot".into());
+    }
+    let [left, top, right, bottom] = region;
+    let x = (left * source.width as f32).floor() as u32;
+    let y = (top * source.height as f32).floor() as u32;
+    let right = (right * source.width as f32).ceil() as u32;
+    let bottom = (bottom * source.height as f32).ceil() as u32;
+    if right <= x || bottom <= y {
+        return Err("Selection is empty".into());
+    }
+    let image = image::RgbaImage::from_raw(source.width, source.height, source.rgba.to_vec())
+        .ok_or("Invalid screenshot pixels")?;
+    let image = image::imageops::crop_imm(&image, x, y, right - x, bottom - y).to_image();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(CapturedImage {
+        width: image.width(),
+        height: image.height(),
+        png: png.into_inner().into(),
+        rgba: image.into_raw().into(),
+    })
+}
+
+pub async fn save(png: &[u8]) -> Result<String, String> {
+    use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
+    let request = SelectedFiles::save_file()
+        .title("Save screenshot")
+        .current_name("Screenshot.png")
+        .filter(FileFilter::new("PNG image").glob("*.png"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let response = match request.response() {
+        Ok(response) => response,
+        Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => {
+            return Ok("Save cancelled".into());
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let path = response
+        .uris()
+        .first()
+        .ok_or("No file selected")?
+        .to_file_path()
+        .map_err(|_| "Choose a local file")?;
+    // Write beside the destination, then rename so a failed write preserves the existing file.
+    let temporary = path.with_file_name(format!(
+        ".popshot-{}-{}.png",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let result = async {
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await?;
+        file.write_all(png).await?;
+        file.sync_all().await?;
+        tokio::fs::rename(&temporary, &path).await
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(format!("Could not save screenshot: {error}"));
+    }
+    Ok(format!("Saved to {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn crop_scales_clamps_and_preserves_pixels() {
+        let source = CapturedImage {
+            width: 4,
+            height: 2,
+            png: Arc::from([]),
+            rgba: Arc::from((0..32).collect::<Vec<u8>>()),
+        };
+        let result = crop(&source, [0.25, 0.0, 0.75, 1.0]).unwrap();
+        assert_eq!((result.width, result.height), (2, 2));
+        assert_eq!(
+            &*result.rgba,
+            &[4, 5, 6, 7, 8, 9, 10, 11, 20, 21, 22, 23, 24, 25, 26, 27]
+        );
+        assert_eq!(
+            image::load_from_memory(&result.png)
+                .unwrap()
+                .into_rgba8()
+                .as_raw(),
+            &*result.rgba
+        );
+        assert!(crop(&source, [0.5, 0.0, 0.25, 1.0]).is_err());
+        assert!(crop(&source, [f32::NAN, 0.0, 1.0, 1.0]).is_err());
+        assert!(crop(&source, [-0.1, 0.0, 1.0, 1.0]).is_err());
+        assert_eq!(
+            crop(&source, [0.0, 0.0, 1.0, 1.0]).unwrap().rgba,
+            source.rgba
+        );
+    }
 }

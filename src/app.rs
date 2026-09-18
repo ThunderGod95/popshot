@@ -1,18 +1,11 @@
-use std::{collections::HashMap, time::Duration};
-
 use crate::{
     capture::{self, CapturedImage},
-    display::DisplayState,
-    geometry::{LogicalPoint, LogicalRect, Selection},
-    selection::SelectionEvent,
+    output_selection::{CaptureMode, OutputSelection},
 };
-
 use cosmic::{
     iced::{
-        ContentFit, Event, Length, Subscription,
-        core::event::wayland::OutputEvent,
-        event,
-        keyboard::{Event as KeyEvent, Key, key::Named},
+        self, ContentFit, Event, Length, Subscription,
+        keyboard::{self, Key, key::Named},
         widget::Stack,
         window,
     },
@@ -20,478 +13,286 @@ use cosmic::{
     widget::{self, image::Handle},
 };
 
-use wayland_client::protocol::wl_output::WlOutput;
-
 pub struct AppModel {
     core: cosmic::Core,
-
-    state: AppState,
-
-    screenshot: Option<CapturedImage>,
-
-    overlay_images: HashMap<window::Id, Handle>,
-
-    display: DisplayState,
-
-    selection_start: Option<LogicalPoint>,
-    selection_rect: Option<LogicalRect>,
-
-    geometry_generation: u64,
-}
-
-#[derive(Debug, Clone)]
-enum AppState {
-    Capturing,
-    Selecting,
-    Processing,
+    overlay: window::Id,
+    source: Option<CapturedImage>,
+    result: Option<CapturedImage>,
+    handle: Option<Handle>,
+    selecting: bool,
+    dragging: bool,
+    busy: bool,
+    status: String,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    CaptureFinished(Result<CapturedImage, String>),
-
-    OutputChanged(OutputEvent, WlOutput),
-
-    GeometrySettled(u64),
-
-    Selection(SelectionEvent),
-
-    SelectionProcessed(Result<(), String>),
-
+    Captured(Result<CapturedImage, String>),
+    Mode(CaptureMode),
+    Select([f32; 4]),
+    Drag(bool),
+    Copy,
+    Save,
+    Done(Result<String, String>),
     Cancel,
+    Opened(window::Id),
 }
 
 impl AppModel {
-    fn schedule_geometry_check(&mut self) -> Task<cosmic::Action<Message>> {
-        self.geometry_generation = self.geometry_generation.wrapping_add(1);
-
-        let generation = self.geometry_generation;
-
-        cosmic::task::future(async move {
-            tokio::time::sleep(Duration::from_millis(75)).await;
-
-            cosmic::Action::App(Message::GeometrySettled(generation))
-        })
-    }
-
-    fn try_open_overlays(&mut self) -> Task<cosmic::Action<Message>> {
-        if !matches!(self.state, AppState::Capturing) {
-            return Task::none();
-        }
-
-        if self.screenshot.is_none() || self.display.len() == 0 {
-            return Task::none();
-        }
-
-        let images = match self.build_overlay_images() {
-            Ok(images) => images,
-
-            Err(error) => {
-                eprintln!(
-                    "popshot: invalid display geometry: \
-                         {error}"
-                );
-
-                return cosmic::iced::exit();
-            }
-        };
-
-        self.overlay_images = images;
-        self.state = AppState::Selecting;
-
-        let tasks = self
-            .display
-            .outputs()
-            .iter()
-            .map(|output| crate::overlay::open(output.overlay_id, output.output.clone()))
-            .collect::<Vec<_>>();
-
-        Task::batch(tasks)
-    }
-
-    fn build_overlay_images(&self) -> Result<HashMap<window::Id, Handle>, String> {
-        let screenshot = self
-            .screenshot
-            .as_ref()
-            .ok_or_else(|| "screenshot is unavailable".to_string())?;
-
-        let mut result = HashMap::new();
-
-        /*
-         * Single-output screenshots may retain physical capture
-         * resolution, so keep the whole source image and let iced
-         * uniformly scale it onto the logical output surface.
-         */
-        if let Some(output) = self.display.single_output() {
-            let Some((scale_x, scale_y)) = output
-                .geometry
-                .image_scale(screenshot.width, screenshot.height)
-            else {
-                return Err(format!(
-                    "single-output screenshot {}x{} \
-                     does not match logical output {}x{}",
-                    screenshot.width,
-                    screenshot.height,
-                    output.geometry.size.0,
-                    output.geometry.size.1,
-                ));
-            };
-
-            eprintln!(
-                "popshot: single output: \
-                 logical={}x{}, screenshot={}x{}, \
-                 scale={scale_x:.4}x{scale_y:.4}",
-                output.geometry.size.0, output.geometry.size.1, screenshot.width, screenshot.height,
-            );
-
-            result.insert(
-                output.overlay_id,
-                Handle::from_rgba(
-                    screenshot.width,
-                    screenshot.height,
-                    screenshot.rgba.to_vec(),
-                ),
-            );
-
-            return Ok(result);
-        }
-
-        /*
-         * For multiple outputs COSMIC's portal constructs the returned
-         * PNG directly in logical desktop coordinates.
-         */
-        let bounds = self
-            .display
-            .bounds()
-            .ok_or_else(|| "desktop has no bounds".to_string())?;
-
-        let width = bounds
-            .width()
-            .ok_or_else(|| "invalid desktop width".to_string())?;
-
-        let height = bounds
-            .height()
-            .ok_or_else(|| "invalid desktop height".to_string())?;
-
-        if screenshot.width != width || screenshot.height != height {
-            return Err(format!(
-                "multi-output screenshot is {}x{}, \
-                 but logical desktop is {width}x{height}",
-                screenshot.width, screenshot.height,
-            ));
-        }
-
-        eprintln!(
-            "popshot: {} outputs: \
-             logical desktop={}x{}, screenshot={}x{}",
-            self.display.len(),
-            width,
-            height,
-            screenshot.width,
-            screenshot.height,
-        );
-
-        for output in self.display.outputs() {
-            let (x, y, width, height) = bounds
-                .image_region(output.geometry)
-                .ok_or_else(|| "output lies outside desktop bounds".to_string())?;
-
-            let rgba = crate::image_ops::extract_rgba(screenshot, x, y, width, height)?;
-
-            result.insert(output.overlay_id, Handle::from_rgba(width, height, rgba));
-        }
-
-        Ok(result)
-    }
-
-    fn close_overlays(&self) -> Task<cosmic::Action<Message>> {
-        close_overlay_ids(self.display.overlay_ids())
-    }
-
-    fn finish_selection(&mut self) -> Task<cosmic::Action<Message>> {
-        if !matches!(self.state, AppState::Selecting) {
-            return Task::none();
-        }
-
-        let Some(rect) = self.selection_rect else {
-            self.selection_start = None;
-            return Task::none();
-        };
-
-        if !rect.is_valid() {
-            self.selection_start = None;
-            self.selection_rect = None;
-
-            return Task::none();
-        }
-
-        let Some(bounds) = self
-            .display
-            .bounds()
-            .and_then(|bounds| bounds.logical_rect())
-        else {
-            eprintln!("popshot: desktop bounds disappeared");
-
-            return self.close_overlays().chain(cosmic::iced::exit());
-        };
-
-        let Some(selection) = Selection::from_logical_rect(rect, bounds) else {
-            self.selection_start = None;
-            self.selection_rect = None;
-
-            return Task::none();
-        };
-
-        let Some(screenshot) = self.screenshot.take() else {
-            eprintln!("popshot: captured screenshot disappeared");
-
-            return self.close_overlays().chain(cosmic::iced::exit());
-        };
-
-        self.state = AppState::Processing;
-
-        self.overlay_images.clear();
-        self.selection_start = None;
-        self.selection_rect = None;
-
-        let processing = cosmic::task::future(async move {
-            let result = async {
-                let png = crate::image_ops::crop_to_png(&screenshot, selection)?;
-
-                crate::clipboard::copy_png(&png).await?;
-
-                Ok(())
-            }
-            .await;
-
-            cosmic::Action::App(Message::SelectionProcessed(result))
+    fn open_preview(&mut self) -> Task<cosmic::Action<Message>> {
+        let (_, task) = window::open(window::Settings {
+            size: iced::Size::new(960.0, 640.0),
+            exit_on_close_request: false,
+            ..Default::default()
         });
 
-        self.close_overlays().chain(processing)
+        task.map(|id| cosmic::Action::App(Message::Opened(id)))
     }
-}
 
-fn close_overlay_ids(ids: Vec<window::Id>) -> Task<cosmic::Action<Message>> {
-    let tasks = ids
-        .into_iter()
-        .map(crate::overlay::close)
-        .collect::<Vec<_>>();
+    fn finish(&mut self, region: Option<[f32; 4]>) -> Task<cosmic::Action<Message>> {
+        if !self.selecting {
+            return Task::none();
+        }
 
-    Task::batch(tasks)
+        let Some(source) = self.source.as_ref() else {
+            return Task::none();
+        };
+
+        let result = match region {
+            Some(region) => capture::crop(source, region),
+            None => Ok(source.clone()),
+        };
+
+        match result {
+            Ok(image) => {
+                self.handle = Some(Handle::from_rgba(
+                    image.width,
+                    image.height,
+                    image.rgba.to_vec(),
+                ));
+                self.result = Some(image);
+                self.source = None;
+                self.selecting = false;
+                self.status = "Copying screenshot…".into();
+                crate::overlay::close(self.overlay)
+                    .chain(self.open_preview())
+                    .chain(self.copy())
+            }
+
+            Err(error) => {
+                self.status = error;
+                Task::none()
+            }
+        }
+    }
+
+    fn copy(&mut self) -> Task<cosmic::Action<Message>> {
+        let Some(image) = &self.result else {
+            return Task::none();
+        };
+        
+        if self.busy {
+            return Task::none();
+        }
+        
+        self.busy = true;
+        
+        let png = image.png.clone();
+        
+        cosmic::task::future(async move {
+            cosmic::Action::App(Message::Done(
+                crate::clipboard::copy_png(&png)
+                    .await
+                    .map(|()| "Screenshot copied to clipboard".into()),
+            ))
+        })
+    }
 }
 
 impl cosmic::Application for AppModel {
     type Executor = cosmic::executor::Default;
-
     type Flags = ();
     type Message = Message;
-
+    
     const APP_ID: &'static str = "io.github.tg.PopShot";
-
+    
     fn core(&self) -> &cosmic::Core {
         &self.core
     }
-
+    
     fn core_mut(&mut self) -> &mut cosmic::Core {
         &mut self.core
     }
-
-    fn init(
-        core: cosmic::Core,
-        _flags: Self::Flags,
-    ) -> (Self, Task<cosmic::Action<Self::Message>>) {
-        let app = Self {
-            core,
-
-            state: AppState::Capturing,
-
-            screenshot: None,
-
-            overlay_images: HashMap::new(),
-
-            display: DisplayState::default(),
-
-            selection_start: None,
-            selection_rect: None,
-
-            geometry_generation: 0,
-        };
-
-        let task = cosmic::task::future(async {
-            cosmic::Action::App(Message::CaptureFinished(capture::capture_desktop().await))
-        });
-
-        (app, task)
+    
+    fn init(core: cosmic::Core, _: ()) -> (Self, Task<cosmic::Action<Message>>) {
+        (
+            Self {
+                core,
+                overlay: window::Id::unique(),
+                source: None,
+                result: None,
+                handle: None,
+                selecting: false,
+                dragging: false,
+                busy: false,
+                status: String::new(),
+            },
+            cosmic::task::future(async {
+                cosmic::Action::App(Message::Captured(capture::capture_desktop().await))
+            }),
+        )
     }
-
-    fn view(&self) -> Element<'_, Self::Message> {
-        widget::space()
-            .width(Length::Fixed(1.0))
-            .height(Length::Fixed(1.0))
-            .into()
+    
+    fn view(&self) -> Element<'_, Message> {
+        widget::space().into()
     }
+    
+    fn view_window(&self, id: window::Id) -> Element<'_, Message> {
+        if id == self.overlay && self.selecting {
+            let screenshot = widget::image(self.handle.clone().unwrap())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(ContentFit::Fill);
+            
+            let selector = Element::new(OutputSelection {
+                on_select: Message::Select,
+                on_drag: Message::Drag,
+            });
 
-    fn view_window(&self, id: window::Id) -> Element<'_, Self::Message> {
-        let Some(output) = self.display.output_for_overlay(id) else {
-            return widget::space()
-                .width(Length::Fixed(1.0))
-                .height(Length::Fixed(1.0))
-                .into();
-        };
+            let mut layers = vec![screenshot.into(), selector];
 
-        let Some(handle) = self.overlay_images.get(&id) else {
-            return widget::space()
+            if !self.dragging {
+                let mut modes = widget::row([]).spacing(6);
+                for mode in CaptureMode::ALL {
+                    let button = if mode == CaptureMode::Rectangle {
+                        widget::button::suggested(mode.label())
+                    } else {
+                        widget::button::standard(mode.label())
+                    };
+                    modes = modes.push(
+                        button.on_press_maybe(mode.available().then_some(Message::Mode(mode))),
+                    );
+                }
+                modes =
+                    modes.push(widget::button::standard("Close · Esc").on_press(Message::Cancel));
+                let toolbar = widget::container(widget::column([]).spacing(8).push(modes).push(
+                    widget::text(if self.status.is_empty() {
+                        "Drag to snip a rectangle · R Rectangle · F Fullscreen"
+                    } else {
+                        &self.status
+                    }),
+                ))
+                .padding(12)
+                .class(cosmic::theme::Container::Card);
+                layers.push(
+                    widget::container(toolbar)
+                        .width(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .padding(16)
+                        .into(),
+                );
+            }
+            return Stack::with_children(layers)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into();
-        };
-
-        let screenshot = widget::image(handle.clone())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .content_fit(ContentFit::Fill);
-
-        let selector = crate::selection::view(
-            id,
-            output.dnd_id,
-            output.geometry.logical_rect(),
-            self.selection_rect,
-        )
-        .map(Message::Selection);
-
-        Stack::with_children([screenshot.into(), selector])
+        }
+        let buttons = widget::row([])
+            .spacing(8)
+            .push(widget::text::title3("Popshot"))
+            .push(widget::space().width(Length::Fill))
+            .push(
+                widget::button::standard("Copy · Ctrl+C")
+                    .on_press_maybe((self.result.is_some() && !self.busy).then_some(Message::Copy)),
+            )
+            .push(
+                widget::button::suggested("Save as… · Ctrl+S")
+                    .on_press_maybe((self.result.is_some() && !self.busy).then_some(Message::Save)),
+            )
+            .push(widget::button::standard("Close").on_press(Message::Cancel));
+        let mut content = widget::column([]).spacing(16).push(buttons);
+        if let Some(image) = &self.result {
+            content = content.push(widget::text(format!(
+                "{} × {} pixels",
+                image.width, image.height
+            )));
+        }
+        if let Some(handle) = &self.handle {
+            content = content.push(
+                widget::image(handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .content_fit(ContentFit::Contain),
+            );
+        }
+        widget::container(content.push(widget::text(&self.status)))
+            .padding(20)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
     }
-
-    fn subscription(&self) -> Subscription<Self::Message> {
-        event::listen_with(|event, _status, _window| match event {
-            Event::PlatformSpecific(event::PlatformSpecific::Wayland(
-                event::wayland::Event::Output(output_event, output),
-            )) => Some(Message::OutputChanged(output_event, output)),
-
-            Event::Keyboard(KeyEvent::KeyPressed {
+    fn subscription(&self) -> Subscription<Message> {
+        iced::event::listen_with(|event, status, _| match event {
+            Event::Window(window::Event::CloseRequested) => Some(Message::Cancel),
+            Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Named(Named::Escape),
                 ..
             }) => Some(Message::Cancel),
-
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(key),
+                modifiers,
+                ..
+            }) if status == iced::event::Status::Ignored => match key.to_lowercase().as_str() {
+                "c" if modifiers.control() => Some(Message::Copy),
+                "s" if modifiers.control() => Some(Message::Save),
+                "r" if !modifiers.control() => Some(Message::Mode(CaptureMode::Rectangle)),
+                "f" if !modifiers.control() => Some(Message::Mode(CaptureMode::Fullscreen)),
+                _ => None,
+            },
             _ => None,
         })
     }
-
-    fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
+    
+    fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
         match message {
-            Message::CaptureFinished(result) => match result {
-                Ok(screenshot) => {
-                    self.screenshot = Some(screenshot);
-
-                    self.schedule_geometry_check()
-                }
-
-                Err(error) => {
-                    eprintln!(
-                        "popshot: capture failed: \
-                             {error}"
-                    );
-
-                    cosmic::iced::exit()
-                }
-            },
-
-            Message::OutputChanged(event, output) => {
-                if matches!(self.state, AppState::Selecting) {
-                    /*
-                     * Freeze geometry while selecting. Hotplugging or
-                     * rearranging displays invalidates every coordinate
-                     * relationship established for the current capture.
-                     */
-                    let ids = self.display.overlay_ids();
-
-                    self.display.handle_output_event(event, output);
-
-                    eprintln!(
-                        "popshot: display configuration \
-                         changed while selecting"
-                    );
-
-                    return close_overlay_ids(ids).chain(cosmic::iced::exit());
-                }
-
-                self.display.handle_output_event(event, output);
-
-                if matches!(self.state, AppState::Capturing) {
-                    self.schedule_geometry_check()
-                } else {
-                    Task::none()
+            Message::Captured(Ok(image)) => {
+                self.handle = Some(Handle::from_rgba(
+                    image.width,
+                    image.height,
+                    image.rgba.to_vec(),
+                ));
+                self.source = Some(image);
+                self.selecting = true;
+                return crate::overlay::open(self.overlay);
+            }
+            Message::Captured(Err(error)) => {
+                self.status = format!("Capture failed: {error}");
+                return self.open_preview();
+            }
+            Message::Mode(CaptureMode::Fullscreen) if !self.dragging => return self.finish(None),
+            Message::Select(region) => return self.finish(Some(region)),
+            Message::Drag(dragging) => self.dragging = dragging,
+            Message::Copy => return self.copy(),
+            Message::Save if !self.busy => {
+                if let Some(image) = &self.result {
+                    self.busy = true;
+                    let png = image.png.clone();
+                    return cosmic::task::future(async move {
+                        cosmic::Action::App(Message::Done(capture::save(&png).await))
+                    });
                 }
             }
-
-            Message::GeometrySettled(generation) => {
-                if generation != self.geometry_generation {
-                    return Task::none();
-                }
-
-                self.try_open_overlays()
+            Message::Done(result) => {
+                self.busy = false;
+                self.status = result
+                    .unwrap_or_else(|error| format!("{error}. You can retry or save the image."));
             }
-
-            Message::Selection(event) => {
-                if !matches!(self.state, AppState::Selecting) {
-                    return Task::none();
-                }
-
-                match event {
-                    SelectionEvent::Started(point) => {
-                        self.selection_start = Some(point);
-
-                        self.selection_rect = Some(LogicalRect::from_points(point, point));
-
-                        Task::none()
-                    }
-
-                    SelectionEvent::Moved(point) => {
-                        let Some(start) = self.selection_start else {
-                            return Task::none();
-                        };
-
-                        self.selection_rect = Some(LogicalRect::from_points(start, point));
-
-                        Task::none()
-                    }
-
-                    SelectionEvent::Finished => self.finish_selection(),
-
-                    SelectionEvent::Cancelled => {
-                        self.selection_start = None;
-
-                        self.selection_rect = None;
-
-                        Task::none()
-                    }
-                }
+            Message::Cancel => return iced::exit(),
+            Message::Opened(id) => {
+                return self.set_window_title("Popshot — Snipping Tool".into(), id);
             }
-
-            Message::Cancel => {
-                if !matches!(self.state, AppState::Selecting) {
-                    return Task::none();
-                }
-
-                self.screenshot = None;
-                self.overlay_images.clear();
-
-                self.close_overlays().chain(cosmic::iced::exit())
-            }
-
-            Message::SelectionProcessed(result) => {
-                if let Err(error) = result {
-                    eprintln!(
-                        "popshot: failed to process \
-                         selection: {error}"
-                    );
-                }
-
-                cosmic::iced::exit()
-            }
+            _ => {}
         }
+        Task::none()
     }
 }

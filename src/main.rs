@@ -3,12 +3,9 @@
 mod app;
 mod capture;
 mod clipboard;
-mod display;
-mod geometry;
 mod i18n;
-mod image_ops;
+mod output_selection;
 mod overlay;
-mod selection;
 
 fn main() -> cosmic::iced::Result {
     let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
