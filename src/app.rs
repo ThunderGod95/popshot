@@ -22,6 +22,8 @@ impl cosmic::app::CosmicFlags for Flags {
 pub struct AppModel {
     core: cosmic::Core,
     overlay: window::Id,
+    preview: Option<window::Id>,
+    closing_preview: Option<window::Id>,
     source: Option<CapturedImage>,
     result: Option<CapturedImage>,
     handle: Option<Handle>,
@@ -43,9 +45,16 @@ pub enum Message {
     Done(Result<String, String>),
     Cancel,
     Opened(window::Id),
+    Closed(window::Id),
 }
 
 impl AppModel {
+    fn capture() -> Task<cosmic::Action<Message>> {
+        cosmic::task::future(async {
+            cosmic::Action::App(Message::Captured(capture::capture_desktop().await))
+        })
+    }
+
     fn open_preview(&mut self) -> Task<cosmic::Action<Message>> {
         let (_, task) = window::open(window::Settings {
             size: iced::Size::new(1040.0, 720.0),
@@ -99,7 +108,7 @@ impl AppModel {
             return Task::none();
         };
 
-        if self.busy {
+        if self.busy || self.closing_preview.is_some() {
             return Task::none();
         }
 
@@ -139,6 +148,8 @@ impl cosmic::Application for AppModel {
             Self {
                 core,
                 overlay: window::Id::unique(),
+                preview: None,
+                closing_preview: None,
                 source: None,
                 result: None,
                 handle: None,
@@ -148,9 +159,7 @@ impl cosmic::Application for AppModel {
                 status: String::new(),
                 status_detail: None,
             },
-            cosmic::task::future(async {
-                cosmic::Action::App(Message::Captured(capture::capture_desktop().await))
-            }),
+            Self::capture(),
         )
     }
 
@@ -178,7 +187,8 @@ impl cosmic::Application for AppModel {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        iced::event::listen_with(|event, status, _| match event {
+        iced::event::listen_with(|event, status, id| match event {
+            Event::Window(window::Event::Closed) => Some(Message::Closed(id)),
             Event::Window(window::Event::CloseRequested) => Some(Message::Cancel),
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Named(Named::Escape),
@@ -197,6 +207,23 @@ impl cosmic::Application for AppModel {
             },
             _ => None,
         })
+    }
+
+    fn dbus_activation(
+        &mut self,
+        _: cosmic::dbus_activation::Message,
+    ) -> Task<cosmic::Action<Message>> {
+        if self.selecting || self.busy {
+            return Task::none();
+        }
+
+        // Taking the ID also ignores repeat invocations while closing/capturing.
+        let Some(id) = self.preview.take() else {
+            return Task::none();
+        };
+        self.closing_preview = Some(id);
+
+        window::close(id)
     }
 
     fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
@@ -227,7 +254,7 @@ impl cosmic::Application for AppModel {
 
             Message::Copy => return self.copy(),
 
-            Message::Save if !self.busy => {
+            Message::Save if !self.busy && self.closing_preview.is_none() => {
                 if let Some(image) = &self.result {
                     self.busy = true;
                     self.status = "Saving image…".into();
@@ -262,7 +289,21 @@ impl cosmic::Application for AppModel {
             Message::Cancel => return iced::exit(),
 
             Message::Opened(id) => {
+                self.preview = Some(id);
                 return self.set_window_title("Popshot — Snipping Tool".into(), id);
+            }
+
+            Message::Closed(id) if self.closing_preview == Some(id) => {
+                // Request the next screenshot only after the old preview is destroyed.
+                self.closing_preview = None;
+                self.source = None;
+                self.result = None;
+                self.handle = None;
+                self.dragging = false;
+                self.status.clear();
+                self.status_detail = None;
+                self.overlay = window::Id::unique();
+                return Self::capture();
             }
 
             _ => {}
