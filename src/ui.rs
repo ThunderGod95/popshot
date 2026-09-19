@@ -96,6 +96,7 @@ fn snipping_toolbar(status: &str) -> Element<'_, Message> {
     let controls = modes
         .push(widget::space().width(8))
         .push(widget::container(widget::divider::vertical::default()).height(24))
+        .push(settings_button())
         .push(cancel);
 
     let hint = if status.is_empty() {
@@ -181,6 +182,7 @@ fn preview_actions(has_image: bool, busy: bool) -> Element<'static, Message> {
         widget::space().width(Length::Fill).into(),
         copy.into(),
         save.into(),
+        settings_button(),
     ])
     .spacing(8)
     .align_y(Alignment::Center);
@@ -286,5 +288,44 @@ fn status_bar<'a>(
         .align_y(Alignment::Center),
     )
     .padding([12, 20])
+    .into()
+}
+
+fn settings_button() -> Element<'static, Message> {
+    widget::button::icon(icon("emblem-system-symbolic"))
+        .label("Settings")
+        .on_press(Message::Settings)
+        .into()
+}
+
+pub fn settings(show_preview: bool, error: Option<&str>) -> Element<'_, Message> {
+    let header = widget::row([
+        widget::button::standard("Back")
+            .leading_icon(icon("go-previous-symbolic"))
+            .on_press(Message::Back)
+            .into(),
+        widget::text::title2("Settings").into(),
+    ])
+    .spacing(16)
+    .align_y(Alignment::Center);
+
+    let capture = widget::settings::section().title("Capture").add(
+        widget::settings::item::builder("Show preview after capture")
+            .description("Open the screenshot to review or save it. When off, show a notification after copying it to the clipboard.")
+            .toggler(show_preview, Message::ShowPreview),
+    );
+
+    let mut content = widget::column([header.into(), capture.into()]).spacing(24);
+
+    if let Some(error) = error {
+        content = content.push(widget::text(error));
+    }
+
+    widget::container(widget::scrollable(
+        widget::container(content).max_width(680).padding(24),
+    ))
+    .center_x(Length::Fill)
+    .height(Length::Fill)
+    .style(preview_background)
     .into()
 }

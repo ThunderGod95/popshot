@@ -149,3 +149,94 @@ pub async fn save(png: &[u8]) -> Result<String, String> {
 
     Ok(format!("Saved to {}", path.display()))
 }
+
+fn notification_thumbnail(image: &CapturedImage) -> Result<Vec<u8>, String> {
+    let pixels = image::RgbaImage::from_raw(image.width, image.height, image.rgba.to_vec())
+        .ok_or("Invalid screenshot pixels")?;
+    let thumbnail = image::DynamicImage::ImageRgba8(pixels)
+        .thumbnail(128, 128)
+        .into_rgba8();
+    let mut square = image::RgbaImage::new(128, 128);
+
+    image::imageops::overlay(
+        &mut square,
+        &thumbnail,
+        i64::from((128 - thumbnail.width()) / 2),
+        i64::from((128 - thumbnail.height()) / 2),
+    );
+
+    let mut png = std::io::Cursor::new(Vec::new());
+
+    square
+        .write_to(&mut png, ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+
+    Ok(png.into_inner())
+}
+
+async fn send_notification(
+    portal: &ashpd::desktop::notification::NotificationProxy<'_>,
+    image: &CapturedImage,
+) -> Result<(), String> {
+    use ashpd::desktop::{Icon, notification::Notification};
+
+    let notification = || {
+        Notification::new("Screenshot captured")
+            .body("Your screenshot has been copied to the clipboard. Click to preview or save it.")
+            .default_action("preview")
+    };
+
+    if let Ok(thumbnail) = notification_thumbnail(image)
+        && portal
+            .add_notification("capture", notification().icon(Icon::Bytes(thumbnail)))
+            .await
+            .is_ok()
+    {
+        return Ok(());
+    }
+
+    // Still deliver confirmation if the desktop rejects the thumbnail.
+    portal
+        .add_notification("capture", notification())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub fn notify(
+    image: CapturedImage,
+    capture_id: cosmic::iced::window::Id,
+) -> cosmic::iced::Task<crate::app::Message> {
+    use crate::app::Message;
+    use cosmic::iced::{
+        Task,
+        futures::{SinkExt, StreamExt},
+        stream,
+    };
+
+    Task::stream(stream::channel(2, async move |mut output| {
+        let result = async {
+            let portal = ashpd::desktop::notification::NotificationProxy::new()
+                .await
+                .map_err(|e| e.to_string())?;
+            // Subscribe before publishing so even an immediate click is received.
+            let mut actions = portal
+                .receive_action_invoked()
+                .await
+                .map_err(|e| e.to_string())?;
+            send_notification(&portal, &image).await?;
+            let _ = output.send(Message::Notified(Ok(()))).await;
+            while let Some(action) = actions.next().await {
+                if action.id() == "capture" && action.name() == "preview" {
+                    let _ = portal.remove_notification("capture").await;
+                    let _ = output.send(Message::PreviewRequested(capture_id)).await;
+                    return Ok(());
+                }
+            }
+            Err("Notification action listener disconnected".to_string())
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = output.send(Message::Notified(Err(error))).await;
+        }
+    }))
+}
