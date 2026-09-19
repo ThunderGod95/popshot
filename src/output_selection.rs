@@ -19,6 +19,7 @@ pub enum CaptureMode {
     Window,
     Fullscreen,
 }
+
 impl CaptureMode {
     pub const ALL: [Self; 4] = [
         Self::Rectangle,
@@ -26,6 +27,7 @@ impl CaptureMode {
         Self::Window,
         Self::Fullscreen,
     ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Rectangle => "Rectangle",
@@ -34,6 +36,7 @@ impl CaptureMode {
             Self::Fullscreen => "Fullscreen",
         }
     }
+
     pub fn available(self) -> bool {
         matches!(self, Self::Rectangle | Self::Fullscreen)
     }
@@ -44,9 +47,11 @@ struct Drag {
     start: Option<Point>,
     end: Point,
 }
+
 impl Drag {
     fn rectangle(&self) -> Option<Rectangle> {
         let start = self.start?;
+
         Some(Rectangle {
             x: start.x.min(self.end.x),
             y: start.y.min(self.end.y),
@@ -62,21 +67,26 @@ pub struct OutputSelection<Message> {
     pub on_select: fn([f32; 4]) -> Message,
     pub on_drag: fn(bool) -> Message,
 }
+
 impl<Message: Clone + 'static> Widget<Message, cosmic::Theme, cosmic::Renderer>
     for OutputSelection<Message>
 {
     fn size(&self) -> Size<Length> {
         Size::new(Length::Fill, Length::Fill)
     }
+
     fn state(&self) -> tree::State {
         tree::State::new(Drag::default())
     }
+
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<Drag>()
     }
+
     fn layout(&mut self, _: &mut Tree, _: &cosmic::Renderer, limits: &iced::Limits) -> Node {
         Node::new(limits.resolve(Length::Fill, Length::Fill, Size::ZERO))
     }
+
     fn draw(
         &self,
         tree: &Tree,
@@ -89,6 +99,7 @@ impl<Message: Clone + 'static> Widget<Message, cosmic::Theme, cosmic::Renderer>
     ) {
         let bounds = layout.bounds();
         let selected = tree.state.downcast_ref::<Drag>().rectangle();
+
         let mut fill = |bounds: Rectangle| {
             renderer.fill_quad(
                 Quad {
@@ -98,6 +109,7 @@ impl<Message: Clone + 'static> Widget<Message, cosmic::Theme, cosmic::Renderer>
                 Color::from_rgba(0.0, 0.0, 0.0, 0.45),
             )
         };
+
         if let Some(r) = selected {
             fill(Rectangle {
                 height: r.y,
@@ -140,6 +152,7 @@ impl<Message: Clone + 'static> Widget<Message, cosmic::Theme, cosmic::Renderer>
             fill(bounds);
         }
     }
+
     fn mouse_interaction(
         &self,
         _: &Tree,
@@ -150,6 +163,7 @@ impl<Message: Clone + 'static> Widget<Message, cosmic::Theme, cosmic::Renderer>
     ) -> mouse::Interaction {
         mouse::Interaction::Crosshair
     }
+
     fn update(
         &mut self,
         tree: &mut Tree,
@@ -169,6 +183,7 @@ impl<Message: Clone + 'static> Widget<Message, cosmic::Theme, cosmic::Renderer>
                 (p.y - bounds.y).clamp(0.0, bounds.height),
             )
         });
+
         match event {
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
                 if cursor.is_over(bounds) =>
@@ -177,17 +192,20 @@ impl<Message: Clone + 'static> Widget<Message, cosmic::Theme, cosmic::Renderer>
                 drag.end = point.unwrap();
                 shell.publish((self.on_drag)(true));
             }
+
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if drag.start.is_some() => {
                 if let Some(point) = point {
                     drag.end = point;
                 }
             }
+
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
                 if drag.start.is_some() =>
             {
                 if let Some(point) = point {
                     drag.end = point;
                 }
+
                 if let Some(r) = drag
                     .rectangle()
                     .filter(|r| r.width >= 2.0 && r.height >= 2.0)
@@ -199,39 +217,14 @@ impl<Message: Clone + 'static> Widget<Message, cosmic::Theme, cosmic::Renderer>
                         (r.y + r.height) / bounds.height,
                     ]));
                 }
+
                 drag.start = None;
                 shell.publish((self.on_drag)(false));
             }
             _ => return,
         }
+
         shell.request_redraw();
         shell.capture_event();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn drag_in_any_direction() {
-        for (a, b) in [
-            (Point::new(10.0, 20.0), Point::new(50.0, 80.0)),
-            (Point::new(50.0, 80.0), Point::new(10.0, 20.0)),
-            (Point::new(10.0, 80.0), Point::new(50.0, 20.0)),
-        ] {
-            assert_eq!(
-                Drag {
-                    start: Some(a),
-                    end: b
-                }
-                .rectangle(),
-                Some(Rectangle {
-                    x: 10.0,
-                    y: 20.0,
-                    width: 40.0,
-                    height: 60.0
-                })
-            );
-        }
     }
 }

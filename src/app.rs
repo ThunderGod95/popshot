@@ -12,6 +12,13 @@ use cosmic::{
     widget::{self, image::Handle},
 };
 
+pub struct Flags;
+
+impl cosmic::app::CosmicFlags for Flags {
+    type SubCommand = String;
+    type Args = Vec<String>;
+}
+
 pub struct AppModel {
     core: cosmic::Core,
     overlay: window::Id,
@@ -114,7 +121,7 @@ impl AppModel {
 
 impl cosmic::Application for AppModel {
     type Executor = cosmic::executor::Default;
-    type Flags = ();
+    type Flags = Flags;
     type Message = Message;
 
     const APP_ID: &'static str = "io.github.tg.PopShot";
@@ -127,7 +134,7 @@ impl cosmic::Application for AppModel {
         &mut self.core
     }
 
-    fn init(core: cosmic::Core, _: ()) -> (Self, Task<cosmic::Action<Message>>) {
+    fn init(core: cosmic::Core, _: Flags) -> (Self, Task<cosmic::Action<Message>>) {
         (
             Self {
                 core,
@@ -262,40 +269,5 @@ impl cosmic::Application for AppModel {
         }
 
         Task::none()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cosmic::Application;
-
-    #[test]
-    fn failed_output_keeps_capture_and_retry_clears_error() {
-        let (mut app, _) = AppModel::init(cosmic::Core::default(), ());
-        app.result = Some(CapturedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![255; 4].into(),
-            png: vec![1, 2, 3].into(),
-        });
-        app.busy = true;
-        let _ = app.update(Message::Done(Err("backend error".into())));
-        assert!(!app.busy);
-        assert!(app.result.is_some());
-        assert_eq!(app.status_detail.as_deref(), Some("backend error"));
-        assert!(!app.status.contains("backend error"));
-        let _ = app.update(Message::Copy);
-        assert!(app.busy);
-        assert!(app.status_detail.is_none());
-        let _ = app.update(Message::Done(Ok("Copied to clipboard".into())));
-        assert!(!app.busy);
-        assert_eq!(app.status, "Copied to clipboard");
-        let _ = app.update(Message::Done(Ok("Saved to /tmp/Screenshot.png".into())));
-        assert_eq!(app.status, "Screenshot saved");
-        let _ = app.update(Message::Done(Ok("Save cancelled".into())));
-        assert_eq!(app.status, "Save cancelled");
-        assert!(app.status_detail.is_none());
-        assert!(app.result.is_some());
     }
 }

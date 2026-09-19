@@ -17,5 +17,5 @@ fn main() -> cosmic::iced::Result {
         .no_main_window(true)
         .exit_on_close(false);
 
-    cosmic::app::run::<app::AppModel>(settings, ())
+    cosmic::app::run_single_instance::<app::AppModel>(settings, app::Flags)
 }
