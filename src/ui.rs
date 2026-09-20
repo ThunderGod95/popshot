@@ -16,16 +16,19 @@ fn icon(name: &'static str) -> widget::icon::Handle {
 /// A floating surface follows the desktop theme, with enough separation from any wallpaper.
 fn floating_surface(theme: &Theme) -> widget::container::Style {
     let mut style = cosmic::theme::Container::background(theme.cosmic(), false);
+
     style.border = Border {
-        radius: 16.0.into(),
+        radius: theme.cosmic().corner_radii.radius_m.into(),
         width: 1.0,
         color: theme.cosmic().background(false).component.divider.into(),
     };
+
     style.shadow = Shadow {
         color: Color::from_rgba(0.0, 0.0, 0.0, 0.28),
         offset: Vector::new(0.0, 8.0),
         blur_radius: 28.0,
     };
+
     style
 }
 
@@ -144,25 +147,20 @@ fn preview_background(theme: &Theme) -> widget::container::Style {
 }
 
 fn preview_actions(has_image: bool, busy: bool) -> Element<'static, Message> {
-    let title = widget::row([
-        widget::icon(icon("accessories-screenshot-symbolic"))
-            .size(24)
-            .into(),
-        widget::text::heading("Screenshot").into(),
-    ])
-    .spacing(12)
-    .align_y(Alignment::Center);
+    let new_snip = widget::button::suggested("New Snip")
+        .leading_icon(icon("screenshot-selection-symbolic"))
+        .on_press_maybe((!busy).then_some(Message::NewSnip));
 
     let copy = widget::button::standard("Copy")
         .leading_icon(icon("edit-copy-symbolic"))
         .on_press_maybe((has_image && !busy).then_some(Message::Copy));
 
-    let save = widget::button::suggested("Save as…")
+    let save = widget::button::standard("Save as…")
         .leading_icon(icon("document-save-as-symbolic"))
         .on_press_maybe((has_image && !busy).then_some(Message::Save));
 
     let actions = widget::row([
-        title.into(),
+        new_snip.into(),
         widget::space().width(Length::Fill).into(),
         copy.into(),
         save.into(),
@@ -171,29 +169,16 @@ fn preview_actions(has_image: bool, busy: bool) -> Element<'static, Message> {
     .spacing(8)
     .align_y(Alignment::Center);
 
-    widget::container(actions).padding([16, 20]).into()
+    widget::container(actions).padding([8, 12]).into()
 }
 
 fn preview_canvas(handle: Option<&Handle>) -> Element<'static, Message> {
     let content: Element<'static, Message> = match handle {
-        Some(handle) => widget::container(
-            widget::container(widget::image(handle.clone()).content_fit(ContentFit::ScaleDown))
-                .style(|theme: &Theme| widget::container::Style {
-                    border: Border {
-                        width: 1.0,
-                        color: theme.cosmic().background(false).component.divider.into(),
-                        ..Default::default()
-                    },
-                    shadow: Shadow {
-                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
-                        offset: Vector::new(0.0, 4.0),
-                        blur_radius: 16.0,
-                    },
-                    ..Default::default()
-                }),
-        )
-        .center(Length::Fill)
-        .into(),
+        Some(handle) => widget::image(handle.clone())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .content_fit(ContentFit::Contain)
+            .into(),
 
         None => widget::container(
             widget::column([
@@ -201,7 +186,7 @@ fn preview_canvas(handle: Option<&Handle>) -> Element<'static, Message> {
                     .size(48)
                     .into(),
                 widget::text::title3("Screenshot unavailable").into(),
-                widget::text("Please close this window and try again.").into(),
+                widget::text("Choose New Snip to take a screenshot.").into(),
             ])
             .spacing(12)
             .align_x(Alignment::Center),
@@ -211,17 +196,10 @@ fn preview_canvas(handle: Option<&Handle>) -> Element<'static, Message> {
     };
 
     widget::container(content)
-        .padding(32)
+        .padding(8)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(|theme: &Theme| {
-            let mut style = cosmic::theme::Container::background(theme.cosmic(), false);
-
-            style.background = Some(theme.cosmic().background(false).component.base.into());
-            style.border = Border::default();
-
-            style
-        })
+        .style(preview_background)
         .into()
 }
 
@@ -271,7 +249,7 @@ fn status_bar<'a>(
         .spacing(24)
         .align_y(Alignment::Center),
     )
-    .padding([12, 20])
+    .padding([6, 12])
     .into()
 }
 

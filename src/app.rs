@@ -18,6 +18,7 @@ pub struct Flags;
 pub struct AppModel {
     core: cosmic::Core,
     show_preview: bool,
+    return_to_editor: bool,
     settings_open: bool,
     settings_error: Option<String>,
     pending_preview: Option<crate::activation::Request>,
@@ -42,6 +43,7 @@ pub enum Message {
     Select([f32; 4]),
     Drag(bool),
     Copy,
+    NewSnip,
     Save,
     Done(Result<String, String>),
     Settings,
@@ -173,10 +175,12 @@ impl AppModel {
         })
     }
 
-    fn activate(&mut self) -> Task<cosmic::Action<Message>> {
+    fn activate(&mut self, return_to_editor: bool) -> Task<cosmic::Action<Message>> {
         if self.selecting || self.busy || self.settings_open || self.closing_preview.is_some() {
             return Task::none();
         }
+
+        self.return_to_editor = return_to_editor;
 
         // Taking the ID also ignores repeat invocations while closing/capturing.
         let Some(id) = self.preview.take() else {
@@ -243,6 +247,7 @@ impl cosmic::Application for AppModel {
             Self {
                 core,
                 show_preview,
+                return_to_editor: false,
                 settings_open: false,
                 pending_preview: None,
                 activation_token: None,
@@ -340,14 +345,16 @@ impl cosmic::Application for AppModel {
 
                 self.activation_token = request.token;
 
-                return self.activate();
+                return self.activate(false);
             }
+
+            Message::NewSnip if self.preview.is_some() => return self.activate(true),
 
             Message::Prepared(Ok(id)) => {
                 self.busy = false;
                 self.status = "Copied to clipboard".into();
 
-                if self.show_preview && self.pending_preview.is_none() {
+                if (self.show_preview || self.return_to_editor) && self.pending_preview.is_none() {
                     return self.open_preview();
                 }
 
