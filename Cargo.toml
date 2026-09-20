@@ -14,9 +14,13 @@ i18n-embed = { version = "0.16", features = [
 i18n-embed-fl = "0.10"
 rust-embed = "8.8.0"
 tokio = { version = "1.48.0", features = ["full"] }
-ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "notification", "screenshot", "file_chooser"] }
+url = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 wayland-client = "0.31.15"
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+uuid = { version = "1", features = ["v4"] }
+rustix = { version = "1", features = ["fs", "process"] }
 
 [build-dependencies]
 xdgen = "0.1"
@@ -24,6 +28,8 @@ xdgen = "0.1"
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
 features = [
-    "single-instance",
     "wgpu",
 ]
+
+[profile.release]
+lto = false

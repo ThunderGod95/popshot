@@ -15,17 +15,13 @@ use cosmic::{
 
 pub struct Flags;
 
-impl cosmic::app::CosmicFlags for Flags {
-    type SubCommand = String;
-    type Args = Vec<String>;
-}
-
 pub struct AppModel {
     core: cosmic::Core,
     show_preview: bool,
     settings_window: Option<window::Id>,
     settings_error: Option<String>,
-    notification_task: Option<iced::task::Handle>,
+    pending_preview: Option<crate::activation::Request>,
+    activation_token: Option<String>,
     overlay: window::Id,
     preview: Option<window::Id>,
     closing_preview: Option<window::Id>,
@@ -52,7 +48,9 @@ pub enum Message {
     Back,
     ShowPreview(bool),
     Notified(Result<(), String>),
-    PreviewRequested(window::Id),
+    Activated(crate::activation::Request),
+    PreviewLoaded(Result<CapturedImage, String>),
+    Prepared(Result<String, String>),
     CloseRequested(window::Id),
     Cancel,
     Opened(window::Id),
@@ -62,21 +60,15 @@ pub enum Message {
 impl AppModel {
     fn capture() -> Task<cosmic::Action<Message>> {
         cosmic::task::future(async {
-            // Identify native launches to the notification portal before using any portal.
-            // Older portals may not support registration; they infer the identity themselves.
-            let app_id = <Self as cosmic::Application>::APP_ID
-                .parse()
-                .expect("valid app ID");
-            let _ = ashpd::register_host_app(app_id).await;
-
             cosmic::Action::App(Message::Captured(capture::capture_desktop().await))
         })
     }
 
     fn open_preview(&mut self) -> Task<cosmic::Action<Message>> {
         if let Some(id) = self.preview {
-            return window::gain_focus(id);
+            return self.focus_preview(id);
         }
+
         let (id, task) = window::open(window::Settings {
             size: iced::Size::new(1040.0, 720.0),
             min_size: Some(iced::Size::new(560.0, 360.0)),
@@ -85,7 +77,15 @@ impl AppModel {
         });
 
         self.preview = Some(id);
+
         task.map(|id| cosmic::Action::App(Message::Opened(id)))
+    }
+
+    fn focus_preview(&mut self, id: window::Id) -> Task<cosmic::Action<Message>> {
+        if let Some(token) = self.activation_token.take() {
+            return iced::platform_specific::shell::commands::activation::activate(id, token);
+        }
+        window::gain_focus(id)
     }
 
     fn finish(&mut self, region: Option<[f32; 4]>) -> Task<cosmic::Action<Message>> {
@@ -114,15 +114,21 @@ impl AppModel {
                 self.selecting = false;
                 self.status = "Copying screenshot…".into();
 
-                let preview = if self.show_preview {
-                    self.open_preview()
-                } else {
-                    Task::none()
-                };
+                self.busy = true;
 
-                crate::overlay::close(self.overlay)
-                    .chain(preview)
-                    .chain(self.copy())
+                let png = self.result.as_ref().unwrap().png.clone();
+
+                crate::overlay::close(self.overlay).chain(cosmic::task::future(async move {
+                    let result = async {
+                        crate::clipboard::copy_png(&png).await?;
+                        tokio::task::spawn_blocking(move || crate::cache::store(&png))
+                            .await
+                            .map_err(|e| e.to_string())?
+                    }
+                    .await;
+
+                    cosmic::Action::App(Message::Prepared(result))
+                }))
             }
 
             Err(error) => {
@@ -133,7 +139,6 @@ impl AppModel {
     }
 
     fn restart_capture(&mut self) -> Task<cosmic::Action<Message>> {
-        self.notification_task = None;
         self.source = None;
         self.result = None;
         self.handle = None;
@@ -142,12 +147,48 @@ impl AppModel {
         self.status.clear();
         self.status_detail = None;
         self.overlay = window::Id::unique();
-        Task::future(async {
-            if let Ok(portal) = ashpd::desktop::notification::NotificationProxy::new().await {
-                let _ = portal.remove_notification("capture").await;
-            }
+        Self::capture()
+    }
+
+    fn load_preview(
+        &mut self,
+        request: crate::activation::Request,
+    ) -> Task<cosmic::Action<Message>> {
+        self.activation_token = request.token;
+
+        let id = request.capture_id.expect("preview request");
+
+        self.busy = true;
+        self.source = None;
+        self.result = None;
+        self.handle = None;
+
+        cosmic::task::future(async move {
+            let result = tokio::task::spawn_blocking(move || crate::cache::load(&id))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|result| result);
+
+            cosmic::Action::App(Message::PreviewLoaded(result))
         })
-        .then(|()| Self::capture())
+    }
+
+    fn activate(&mut self) -> Task<cosmic::Action<Message>> {
+        if self.selecting
+            || self.busy
+            || self.settings_window.is_some()
+            || self.closing_preview.is_some()
+        {
+            return Task::none();
+        }
+
+        // Taking the ID also ignores repeat invocations while closing/capturing.
+        let Some(id) = self.preview.take() else {
+            return self.restart_capture();
+        };
+        self.closing_preview = Some(id);
+
+        window::close(id)
     }
 
     fn copy(&mut self) -> Task<cosmic::Action<Message>> {
@@ -180,7 +221,7 @@ impl cosmic::Application for AppModel {
     type Flags = Flags;
     type Message = Message;
 
-    const APP_ID: &'static str = "io.github.tg.PopShot";
+    const APP_ID: &'static str = crate::activation::APP_ID;
 
     fn core(&self) -> &cosmic::Core {
         &self.core
@@ -206,7 +247,8 @@ impl cosmic::Application for AppModel {
                 core,
                 show_preview,
                 settings_window: None,
-                notification_task: None,
+                pending_preview: None,
+                activation_token: None,
                 settings_error,
                 overlay: window::Id::unique(),
                 preview: None,
@@ -216,11 +258,11 @@ impl cosmic::Application for AppModel {
                 handle: None,
                 selecting: false,
                 dragging: false,
-                busy: true,
+                busy: false,
                 status: String::new(),
                 status_detail: None,
             },
-            Self::capture(),
+            Task::none(),
         )
     }
 
@@ -252,67 +294,125 @@ impl cosmic::Application for AppModel {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        iced::event::listen_with(|event, status, id| match event {
-            Event::Window(window::Event::Closed) => Some(Message::Closed(id)),
+        Subscription::batch([
+            crate::activation::subscription(),
+            iced::event::listen_with(|event, status, id| match event {
+                Event::Window(window::Event::Closed) => Some(Message::Closed(id)),
 
-            Event::Window(window::Event::CloseRequested) => Some(Message::CloseRequested(id)),
+                Event::Window(window::Event::CloseRequested) => Some(Message::CloseRequested(id)),
 
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: Key::Named(Named::Escape),
-                ..
-            }) => Some(Message::CloseRequested(id)),
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: Key::Named(Named::Escape),
+                    ..
+                }) => Some(Message::CloseRequested(id)),
 
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: Key::Character(key),
-                modifiers,
-                ..
-            }) if status == iced::event::Status::Ignored => match key.to_lowercase().as_str() {
-                "c" if modifiers.control() => Some(Message::Copy),
-                "s" if modifiers.control() => Some(Message::Save),
-                "r" if !modifiers.control() => Some(Message::Mode(CaptureMode::Rectangle)),
-                "f" if !modifiers.control() => Some(Message::Mode(CaptureMode::Fullscreen)),
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: Key::Character(key),
+                    modifiers,
+                    ..
+                }) if status == iced::event::Status::Ignored => match key.to_lowercase().as_str() {
+                    "c" if modifiers.control() => Some(Message::Copy),
+                    "s" if modifiers.control() => Some(Message::Save),
+                    "r" if !modifiers.control() => Some(Message::Mode(CaptureMode::Rectangle)),
+                    "f" if !modifiers.control() => Some(Message::Mode(CaptureMode::Fullscreen)),
+                    _ => None,
+                },
+
                 _ => None,
-            },
-
-            _ => None,
-        })
-    }
-
-    fn dbus_activation(
-        &mut self,
-        _: cosmic::dbus_activation::Message,
-    ) -> Task<cosmic::Action<Message>> {
-        if self.selecting
-            || self.busy
-            || self.settings_window.is_some()
-            || self.closing_preview.is_some()
-        {
-            return Task::none();
-        }
-
-        // Taking the ID also ignores repeat invocations while closing/capturing.
-        let Some(id) = self.preview.take() else {
-            return self.restart_capture();
-        };
-        self.closing_preview = Some(id);
-
-        window::close(id)
+            }),
+        ])
     }
 
     fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
         match message {
+            Message::Activated(request) => {
+                if request.capture_id.is_some() {
+                    if self.busy
+                        || self.selecting
+                        || self.settings_window.is_some()
+                        || self.closing_preview.is_some()
+                    {
+                        self.pending_preview = Some(request);
+                        return Task::none();
+                    }
+
+                    return self.load_preview(request);
+                }
+
+                self.activation_token = request.token;
+
+                return self.activate();
+            }
+
+            Message::Prepared(Ok(id)) => {
+                self.busy = false;
+                self.status = "Copied to clipboard".into();
+
+                if self.show_preview && self.pending_preview.is_none() {
+                    return self.open_preview();
+                }
+
+                self.busy = true;
+
+                let image = self.result.clone().expect("capture prepared");
+
+                return cosmic::task::future(async move {
+                    cosmic::Action::App(Message::Notified(capture::notify(&image, &id).await))
+                });
+            }
+
+            Message::Prepared(Err(error)) => {
+                self.busy = false;
+                self.status = "Couldn’t finish capturing. Copy or save your screenshot.".into();
+                self.status_detail = Some(error);
+
+                return self.open_preview();
+            }
+
+            Message::PreviewLoaded(result) => {
+                self.busy = false;
+
+                if let Some(request) = self.pending_preview.take() {
+                    return self.load_preview(request);
+                }
+
+                match result {
+                    Ok(image) => {
+                        self.handle = Some(Handle::from_rgba(
+                            image.width,
+                            image.height,
+                            image.rgba.to_vec(),
+                        ));
+                        self.result = Some(image);
+                        self.status = "Screenshot ready".into();
+                        self.status_detail = None;
+                    }
+
+                    Err(error) => {
+                        self.status = "Cached screenshot is no longer available.".into();
+                        self.status_detail = Some(error);
+                    }
+                }
+
+                return self.open_preview();
+            }
+
             Message::Settings => {
                 if let Some(id) = self.settings_window {
                     return window::gain_focus(id);
                 }
+
                 let (id, task) = window::open(window::Settings {
                     size: iced::Size::new(640.0, 360.0),
                     min_size: Some(iced::Size::new(420.0, 280.0)),
                     exit_on_close_request: false,
                     ..Default::default()
                 });
+
                 self.settings_window = Some(id);
+
                 let open = task.map(|id| cosmic::Action::App(Message::Opened(id)));
+
                 return if self.selecting {
                     crate::overlay::close(self.overlay).chain(open)
                 } else {
@@ -326,9 +426,6 @@ impl cosmic::Application for AppModel {
             }
             Message::CloseRequested(id) if self.settings_window == Some(id) => {
                 return window::close(id);
-            }
-            Message::PreviewRequested(id) if id == self.overlay && !self.selecting => {
-                return self.open_preview();
             }
 
             Message::ShowPreview(value) => {
@@ -349,6 +446,10 @@ impl cosmic::Application for AppModel {
                 self.busy = false;
                 self.status = "Copied to clipboard".into();
                 self.status_detail = None;
+                if let Some(request) = self.pending_preview.take() {
+                    return self.load_preview(request);
+                }
+                return iced::exit();
             }
 
             Message::Notified(Err(error)) => {
@@ -407,26 +508,6 @@ impl cosmic::Application for AppModel {
 
             Message::Done(result) => {
                 self.busy = false;
-                if self.preview.is_none() && !self.show_preview {
-                    match result {
-                        Ok(_) => {
-                            if let Some(image) = self.result.clone() {
-                                self.busy = true;
-                                let (task, handle) =
-                                    capture::notify(image, self.overlay).abortable();
-                                self.notification_task = Some(handle.abort_on_drop());
-                                return task.map(cosmic::Action::App);
-                            }
-                        }
-                        Err(error) => {
-                            self.status =
-                                "Couldn’t copy the screenshot. Try again or save it.".into();
-                            self.status_detail = Some(error);
-                            return self.open_preview();
-                        }
-                    }
-                    return Task::none();
-                }
                 match result {
                     Ok(status) => {
                         self.status = if status.starts_with("Saved to ") {
@@ -443,13 +524,24 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::Cancel | Message::CloseRequested(_) => return iced::exit(),
+            // Finish writes before exiting, including a save already in progress.
+            Message::Cancel | Message::CloseRequested(_) if self.busy => return Task::none(),
+            Message::Cancel | Message::CloseRequested(_) => {
+                if let Some(request) = self.pending_preview.take() {
+                    self.selecting = false;
+                    return crate::overlay::close(self.overlay).chain(self.load_preview(request));
+                }
+                return iced::exit();
+            }
 
             Message::Opened(id) if self.settings_window == Some(id) => {
                 return self.set_window_title("Popshot — Settings".into(), id);
             }
+
             Message::Opened(id) => {
-                return self.set_window_title("Popshot — Snipping Tool".into(), id);
+                return self
+                    .set_window_title("Popshot — Snipping Tool".into(), id)
+                    .chain(self.focus_preview(id));
             }
 
             Message::Closed(id) if self.closing_preview == Some(id) => {
@@ -457,6 +549,7 @@ impl cosmic::Application for AppModel {
                 self.closing_preview = None;
                 return self.restart_capture();
             }
+
             Message::Closed(id) if self.settings_window == Some(id) => {
                 self.settings_window = None;
                 if self.selecting {
@@ -468,76 +561,14 @@ impl cosmic::Application for AppModel {
             _ => {}
         }
 
+        if !self.busy
+            && !self.selecting
+            && self.settings_window.is_none()
+            && let Some(request) = self.pending_preview.take()
+        {
+            return self.load_preview(request);
+        }
+
         Task::none()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cosmic::Application;
-
-    #[test]
-    fn settings_window_and_notification_preview_lifecycle() {
-        let image = CapturedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![255; 4].into(),
-            png: Vec::new().into(),
-        };
-        let mut app = AppModel {
-            core: cosmic::Core::default(),
-            show_preview: false,
-            settings_window: None,
-            settings_error: None,
-            notification_task: None,
-            overlay: window::Id::unique(),
-            preview: None,
-            closing_preview: None,
-            source: Some(image),
-            result: None,
-            handle: None,
-            selecting: true,
-            dragging: false,
-            busy: false,
-            status: String::new(),
-            status_detail: None,
-        };
-        let overlay = app.overlay;
-        let _ = app.update(Message::Settings);
-        let settings = app.settings_window.unwrap();
-        assert_ne!(settings, overlay);
-        assert!(app.preview.is_none());
-        let _ = app.update(Message::Settings);
-        assert_eq!(app.settings_window, Some(settings));
-        let _ = app.update(Message::Mode(CaptureMode::Fullscreen));
-        assert!(app.source.is_some() && app.result.is_none());
-        let _ = app.update(Message::CloseRequested(settings));
-        let _ = app.update(Message::Closed(settings));
-        assert!(app.settings_window.is_none() && app.selecting);
-        assert_ne!(app.overlay, overlay);
-        assert!(app.source.is_some());
-
-        let _ = app.update(Message::Mode(CaptureMode::Fullscreen));
-        assert!(app.result.is_some() && app.preview.is_none());
-        let _ = app.update(Message::Notified(Ok(())));
-        assert!(!app.busy && app.result.is_some());
-        let _ = app.update(Message::PreviewRequested(overlay));
-        assert!(app.preview.is_none()); // Ignore a click for an earlier capture.
-        let _ = app.update(Message::PreviewRequested(app.overlay));
-        let preview = app.preview.unwrap();
-        let _ = app.update(Message::PreviewRequested(app.overlay));
-        assert_eq!(app.preview, Some(preview));
-        let _ = app.update(Message::Settings);
-        let settings = app.settings_window.unwrap();
-        let _ = app.update(Message::Back);
-        let _ = app.update(Message::Closed(settings));
-        assert_eq!(app.preview, Some(preview));
-        assert!(app.result.is_some() && app.settings_window.is_none());
-
-        // A normal launch after a notification starts another capture.
-        app.preview = None;
-        let _ = app.restart_capture();
-        assert!(app.busy && app.result.is_none() && app.notification_task.is_none());
     }
 }

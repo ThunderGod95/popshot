@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ashpd::desktop::screenshot::Screenshot;
+use ashpd::desktop::{notification::DisplayHint, screenshot::Screenshot};
 use image::ImageFormat;
 
 #[derive(Debug, Clone)]
@@ -25,7 +25,8 @@ pub async fn capture_desktop() -> Result<CapturedImage, String> {
         .response()
         .map_err(|error| format!("screenshot request failed: {error}"))?;
 
-    let uri = response.uri();
+    let uri = url::Url::parse(response.uri().as_str())
+        .map_err(|error| format!("invalid screenshot URI: {error}"))?;
 
     if uri.scheme() != "file" {
         return Err(format!("unsupported screenshot URI: {uri}"));
@@ -41,6 +42,10 @@ pub async fn capture_desktop() -> Result<CapturedImage, String> {
 
     let _ = tokio::fs::remove_file(&path).await;
 
+    decode(png)
+}
+
+pub fn decode(png: Vec<u8>) -> Result<CapturedImage, String> {
     let image = image::load_from_memory_with_format(&png, ImageFormat::Png)
         .map_err(|error| format!("failed to decode screenshot: {error}"))?
         .into_rgba8();
@@ -112,10 +117,9 @@ pub async fn save(png: &[u8]) -> Result<String, String> {
         Err(e) => return Err(e.to_string()),
     };
 
-    let path = response
-        .uris()
-        .first()
-        .ok_or("No file selected")?
+    let uri = response.uris().first().ok_or("No file selected")?;
+    let path = url::Url::parse(uri.as_str())
+        .map_err(|_| "Choose a local file")?
         .to_file_path()
         .map_err(|_| "Choose a local file")?;
 
@@ -174,21 +178,34 @@ fn notification_thumbnail(image: &CapturedImage) -> Result<Vec<u8>, String> {
     Ok(png.into_inner())
 }
 
-async fn send_notification(
-    portal: &ashpd::desktop::notification::NotificationProxy<'_>,
-    image: &CapturedImage,
-) -> Result<(), String> {
+pub async fn notify(image: &CapturedImage, capture_id: &str) -> Result<(), String> {
     use ashpd::desktop::{Icon, notification::Notification};
 
+    let portal = ashpd::desktop::notification::NotificationProxy::new()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let portal_version = portal.version();
+
     let notification = || {
-        Notification::new("Screenshot captured")
-            .body("Your screenshot has been copied to the clipboard. Click to preview or save it.")
-            .default_action("preview")
+        let notification = Notification::new("Screenshot captured")
+            .body(
+                "Your screenshot has been copied to the clipboard. \
+                     Click to preview or save it.",
+            )
+            .default_action("app.preview")
+            .default_action_target(capture_id);
+
+        if portal_version >= 2 {
+            notification.display_hint([DisplayHint::HideContentOnLockScreen])
+        } else {
+            notification
+        }
     };
 
     if let Ok(thumbnail) = notification_thumbnail(image)
         && portal
-            .add_notification("capture", notification().icon(Icon::Bytes(thumbnail)))
+            .add_notification(capture_id, notification().icon(Icon::Bytes(thumbnail)))
             .await
             .is_ok()
     {
@@ -197,46 +214,7 @@ async fn send_notification(
 
     // Still deliver confirmation if the desktop rejects the thumbnail.
     portal
-        .add_notification("capture", notification())
+        .add_notification(capture_id, notification())
         .await
         .map_err(|e| e.to_string())
-}
-
-pub fn notify(
-    image: CapturedImage,
-    capture_id: cosmic::iced::window::Id,
-) -> cosmic::iced::Task<crate::app::Message> {
-    use crate::app::Message;
-    use cosmic::iced::{
-        Task,
-        futures::{SinkExt, StreamExt},
-        stream,
-    };
-
-    Task::stream(stream::channel(2, async move |mut output| {
-        let result = async {
-            let portal = ashpd::desktop::notification::NotificationProxy::new()
-                .await
-                .map_err(|e| e.to_string())?;
-            // Subscribe before publishing so even an immediate click is received.
-            let mut actions = portal
-                .receive_action_invoked()
-                .await
-                .map_err(|e| e.to_string())?;
-            send_notification(&portal, &image).await?;
-            let _ = output.send(Message::Notified(Ok(()))).await;
-            while let Some(action) = actions.next().await {
-                if action.id() == "capture" && action.name() == "preview" {
-                    let _ = portal.remove_notification("capture").await;
-                    let _ = output.send(Message::PreviewRequested(capture_id)).await;
-                    return Ok(());
-                }
-            }
-            Err("Notification action listener disconnected".to_string())
-        }
-        .await;
-        if let Err(error) = result {
-            let _ = output.send(Message::Notified(Err(error))).await;
-        }
-    }))
 }

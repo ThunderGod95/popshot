@@ -57,9 +57,9 @@ fn snipping_toolbar(status: &str) -> Element<'_, Message> {
     let mut modes = widget::row([]).spacing(6).align_y(Alignment::Center);
 
     for mode in CaptureMode::ALL.into_iter().filter(|mode| mode.available()) {
-        let (symbol, tip) = match mode {
-            CaptureMode::Rectangle => ("screenshot-selection-symbolic", "Rectangle · R"),
-            CaptureMode::Fullscreen => ("screenshot-screen-symbolic", "Capture full screen · F"),
+        let symbol = match mode {
+            CaptureMode::Rectangle => "screenshot-selection-symbolic",
+            CaptureMode::Fullscreen => "screenshot-screen-symbolic",
             _ => continue,
         };
 
@@ -74,30 +74,22 @@ fn snipping_toolbar(status: &str) -> Element<'_, Message> {
             .padding([10, 14])
             .on_press(Message::Mode(mode));
 
-        modes = modes.push(
-            widget::tooltip(
-                button,
-                widget::text(tip).size(13),
-                widget::tooltip::Position::Bottom,
-            )
-            .gap(8),
-        );
+        modes = modes.push(button);
     }
-
-    let cancel = widget::tooltip(
-        widget::button::icon(icon("window-close-symbolic"))
-            .padding(10)
-            .on_press(Message::Cancel),
-        widget::text("Cancel · Esc").size(13),
-        widget::tooltip::Position::Bottom,
-    )
-    .gap(8);
 
     let controls = modes
         .push(widget::space().width(8))
         .push(widget::container(widget::divider::vertical::default()).height(24))
-        .push(settings_button())
-        .push(cancel);
+        .push(
+            widget::button::icon(icon("emblem-system-symbolic"))
+                .padding(10)
+                .on_press(Message::Settings),
+        )
+        .push(
+            widget::button::icon(icon("window-close-symbolic"))
+                .padding(10)
+                .on_press(Message::Cancel),
+        );
 
     let hint = if status.is_empty() {
         "Drag to capture an area"
@@ -159,23 +151,13 @@ fn preview_actions(has_image: bool, busy: bool) -> Element<'static, Message> {
     .spacing(12)
     .align_y(Alignment::Center);
 
-    let copy = widget::tooltip(
-        widget::button::standard("Copy")
-            .leading_icon(icon("edit-copy-symbolic"))
-            .on_press_maybe((has_image && !busy).then_some(Message::Copy)),
-        widget::text("Copy image · Ctrl+C").size(13),
-        widget::tooltip::Position::Bottom,
-    )
-    .gap(8);
+    let copy = widget::button::standard("Copy")
+        .leading_icon(icon("edit-copy-symbolic"))
+        .on_press_maybe((has_image && !busy).then_some(Message::Copy));
 
-    let save = widget::tooltip(
-        widget::button::suggested("Save as…")
-            .leading_icon(icon("document-save-as-symbolic"))
-            .on_press_maybe((has_image && !busy).then_some(Message::Save)),
-        widget::text("Save image · Ctrl+S").size(13),
-        widget::tooltip::Position::Bottom,
-    )
-    .gap(8);
+    let save = widget::button::suggested("Save as…")
+        .leading_icon(icon("document-save-as-symbolic"))
+        .on_press_maybe((has_image && !busy).then_some(Message::Save));
 
     let actions = widget::row([
         title.into(),

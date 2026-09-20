@@ -24,6 +24,7 @@ bin-dst := base-dir / 'bin' / name
 desktop-dst := base-dir / 'share' / 'applications' / desktop
 icons-dst := base-dir / 'share' / 'icons' / 'hicolor'
 icon-svg-dst := icons-dst / 'scalable' / 'apps' / icon-svg
+service-dst := base-dir / 'share' / 'dbus-1' / 'services' / (appid + '.service')
 
 # Default recipe which runs `just build-release`
 default: build-release
@@ -62,6 +63,9 @@ run *args:
 
 # Installs files
 install:
+    mkdir -p {{parent_directory(service-dst)}}
+    sed 's|@EXEC@|{{prefix / 'bin' / name}}|' resources/app.service > {{service-dst}}
+    chmod 0644 {{service-dst}}
     install -Dm0755 {{ cargo-target-dir / 'release' / name }} {{bin-dst}}
     install -Dm0644 {{ 'target' / 'xdgen' / 'app.desktop' }} {{desktop-dst}}
     install -Dm0644 {{ 'target' / 'xdgen' / 'app.metainfo.xml' }} {{appdata-dst}}
@@ -69,7 +73,7 @@ install:
 
 # Uninstalls installed files
 uninstall:
-    rm {{bin-dst}} {{desktop-dst}} {{icon-svg-dst}}
+    rm {{bin-dst}} {{desktop-dst}} {{icon-svg-dst}} {{service-dst}}
 
 # Vendor dependencies locally
 vendor:
