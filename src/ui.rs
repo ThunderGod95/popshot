@@ -122,7 +122,14 @@ pub fn preview<'a>(
     widget::container(widget::column([
         preview_actions(handle.is_some(), busy),
         widget::divider::horizontal::default().into(),
-        preview_canvas(handle),
+        if handle.is_none() && status.is_empty() {
+            widget::space()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            preview_canvas(handle)
+        },
         widget::divider::horizontal::default().into(),
         status_bar(dimensions, busy, status, detail),
     ]))
@@ -280,34 +287,32 @@ fn settings_button() -> Element<'static, Message> {
         .into()
 }
 
-pub fn settings(show_preview: bool, error: Option<&str>) -> Element<'_, Message> {
-    let header = widget::row([
-        widget::button::standard("Back")
-            .leading_icon(icon("go-previous-symbolic"))
-            .on_press(Message::Back)
-            .into(),
-        widget::text::title2("Settings").into(),
-    ])
-    .spacing(16)
-    .align_y(Alignment::Center);
-
+pub fn settings<'a>(
+    preview: Element<'a, Message>,
+    show_preview: bool,
+    error: Option<&'a str>,
+) -> Element<'a, Message> {
     let capture = widget::settings::section().title("Capture").add(
         widget::settings::item::builder("Show preview after capture")
             .description("Open the screenshot to review or save it. When off, show a notification after copying it to the clipboard.")
             .toggler(show_preview, Message::ShowPreview),
     );
 
-    let mut content = widget::column([header.into(), capture.into()]).spacing(24);
+    let mut content = widget::column([capture.into()]).spacing(24);
 
     if let Some(error) = error {
         content = content.push(widget::text(error));
     }
 
-    widget::container(widget::scrollable(
-        widget::container(content).max_width(680).padding(24),
-    ))
-    .center_x(Length::Fill)
-    .height(Length::Fill)
-    .style(preview_background)
+    widget::context_drawer(
+        Some("Settings".into()),
+        None,
+        None,
+        None,
+        Message::Back,
+        preview,
+        content,
+        400.0,
+    )
     .into()
 }

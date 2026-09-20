@@ -18,7 +18,7 @@ pub struct Flags;
 pub struct AppModel {
     core: cosmic::Core,
     show_preview: bool,
-    settings_window: Option<window::Id>,
+    settings_open: bool,
     settings_error: Option<String>,
     pending_preview: Option<crate::activation::Request>,
     activation_token: Option<String>,
@@ -89,7 +89,7 @@ impl AppModel {
     }
 
     fn finish(&mut self, region: Option<[f32; 4]>) -> Task<cosmic::Action<Message>> {
-        if !self.selecting || self.settings_window.is_some() {
+        if !self.selecting || self.settings_open || self.closing_preview.is_some() {
             return Task::none();
         }
 
@@ -174,11 +174,7 @@ impl AppModel {
     }
 
     fn activate(&mut self) -> Task<cosmic::Action<Message>> {
-        if self.selecting
-            || self.busy
-            || self.settings_window.is_some()
-            || self.closing_preview.is_some()
-        {
+        if self.selecting || self.busy || self.settings_open || self.closing_preview.is_some() {
             return Task::none();
         }
 
@@ -196,7 +192,7 @@ impl AppModel {
             return Task::none();
         };
 
-        if self.busy || self.settings_window.is_some() || self.closing_preview.is_some() {
+        if self.busy || self.settings_open || self.closing_preview.is_some() {
             return Task::none();
         }
 
@@ -246,7 +242,7 @@ impl cosmic::Application for AppModel {
             Self {
                 core,
                 show_preview,
-                settings_window: None,
+                settings_open: false,
                 pending_preview: None,
                 activation_token: None,
                 settings_error,
@@ -271,10 +267,6 @@ impl cosmic::Application for AppModel {
     }
 
     fn view_window(&self, id: window::Id) -> Element<'_, Message> {
-        if self.settings_window == Some(id) {
-            return crate::ui::settings(self.show_preview, self.settings_error.as_deref());
-        }
-
         if id == self.overlay
             && self.selecting
             && let Some(handle) = &self.handle
@@ -282,15 +274,29 @@ impl cosmic::Application for AppModel {
             return crate::ui::selection(handle, self.dragging, &self.status);
         }
 
-        crate::ui::preview(
-            self.handle.as_ref(),
+        let preview = crate::ui::preview(
+            if self.selecting {
+                None
+            } else {
+                self.handle.as_ref()
+            },
             self.result
                 .as_ref()
                 .map(|image| (image.width, image.height)),
             self.busy,
-            &self.status,
-            self.status_detail.as_deref(),
-        )
+            if self.selecting { "" } else { &self.status },
+            if self.selecting {
+                None
+            } else {
+                self.status_detail.as_deref()
+            },
+        );
+
+        if self.settings_open {
+            crate::ui::settings(preview, self.show_preview, self.settings_error.as_deref())
+        } else {
+            preview
+        }
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -329,7 +335,7 @@ impl cosmic::Application for AppModel {
                 if request.capture_id.is_some() {
                     if self.busy
                         || self.selecting
-                        || self.settings_window.is_some()
+                        || self.settings_open
                         || self.closing_preview.is_some()
                     {
                         self.pending_preview = Some(request);
@@ -398,20 +404,13 @@ impl cosmic::Application for AppModel {
             }
 
             Message::Settings => {
-                if let Some(id) = self.settings_window {
-                    return window::gain_focus(id);
+                if self.closing_preview.is_some() {
+                    return Task::none();
                 }
 
-                let (id, task) = window::open(window::Settings {
-                    size: iced::Size::new(640.0, 360.0),
-                    min_size: Some(iced::Size::new(420.0, 280.0)),
-                    exit_on_close_request: false,
-                    ..Default::default()
-                });
+                self.settings_open = true;
 
-                self.settings_window = Some(id);
-
-                let open = task.map(|id| cosmic::Action::App(Message::Opened(id)));
+                let open = self.open_preview();
 
                 return if self.selecting {
                     crate::overlay::close(self.overlay).chain(open)
@@ -419,13 +418,20 @@ impl cosmic::Application for AppModel {
                     open
                 };
             }
+
             Message::Back => {
-                if let Some(id) = self.settings_window {
-                    return window::close(id);
+                self.settings_open = false;
+
+                if self.selecting {
+                    if let Some(id) = self.preview.take() {
+                        self.closing_preview = Some(id);
+                        return window::close(id);
+                    }
                 }
             }
-            Message::CloseRequested(id) if self.settings_window == Some(id) => {
-                return window::close(id);
+
+            Message::CloseRequested(id) if self.settings_open && self.preview == Some(id) => {
+                return self.update(Message::Back);
             }
 
             Message::ShowPreview(value) => {
@@ -436,6 +442,7 @@ impl cosmic::Application for AppModel {
                         self.show_preview = value;
                         self.settings_error = None;
                     }
+
                     Err(error) => {
                         self.settings_error = Some(format!("Couldn’t save settings: {error}"))
                     }
@@ -446,9 +453,11 @@ impl cosmic::Application for AppModel {
                 self.busy = false;
                 self.status = "Copied to clipboard".into();
                 self.status_detail = None;
+
                 if let Some(request) = self.pending_preview.take() {
                     return self.load_preview(request);
                 }
+
                 return iced::exit();
             }
 
@@ -477,6 +486,7 @@ impl cosmic::Application for AppModel {
                 self.busy = false;
                 self.status = "Couldn’t take a screenshot. Please try again.".into();
                 self.status_detail = Some(error);
+
                 return self.open_preview();
             }
 
@@ -489,9 +499,7 @@ impl cosmic::Application for AppModel {
             Message::Copy => return self.copy(),
 
             Message::Save
-                if !self.busy
-                    && self.settings_window.is_none()
-                    && self.closing_preview.is_none() =>
+                if !self.busy && !self.settings_open && self.closing_preview.is_none() =>
             {
                 if let Some(image) = &self.result {
                     self.busy = true;
@@ -508,6 +516,7 @@ impl cosmic::Application for AppModel {
 
             Message::Done(result) => {
                 self.busy = false;
+
                 match result {
                     Ok(status) => {
                         self.status = if status.starts_with("Saved to ") {
@@ -526,16 +535,13 @@ impl cosmic::Application for AppModel {
 
             // Finish writes before exiting, including a save already in progress.
             Message::Cancel | Message::CloseRequested(_) if self.busy => return Task::none(),
+
             Message::Cancel | Message::CloseRequested(_) => {
                 if let Some(request) = self.pending_preview.take() {
                     self.selecting = false;
                     return crate::overlay::close(self.overlay).chain(self.load_preview(request));
                 }
                 return iced::exit();
-            }
-
-            Message::Opened(id) if self.settings_window == Some(id) => {
-                return self.set_window_title("Popshot — Settings".into(), id);
             }
 
             Message::Opened(id) => {
@@ -545,17 +551,15 @@ impl cosmic::Application for AppModel {
             }
 
             Message::Closed(id) if self.closing_preview == Some(id) => {
-                // Request the next screenshot only after the old preview is destroyed.
                 self.closing_preview = None;
-                return self.restart_capture();
-            }
 
-            Message::Closed(id) if self.settings_window == Some(id) => {
-                self.settings_window = None;
                 if self.selecting {
                     self.overlay = window::Id::unique();
                     return crate::overlay::open(self.overlay);
                 }
+
+                // Request the next screenshot only after the old preview is destroyed.
+                return self.restart_capture();
             }
 
             _ => {}
@@ -563,7 +567,8 @@ impl cosmic::Application for AppModel {
 
         if !self.busy
             && !self.selecting
-            && self.settings_window.is_none()
+            && !self.settings_open
+            && self.closing_preview.is_none()
             && let Some(request) = self.pending_preview.take()
         {
             return self.load_preview(request);
