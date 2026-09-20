@@ -89,7 +89,7 @@ impl AppModel {
     }
 
     fn finish(&mut self, region: Option<[f32; 4]>) -> Task<cosmic::Action<Message>> {
-        if !self.selecting || self.settings_open || self.closing_preview.is_some() {
+        if !self.selecting {
             return Task::none();
         }
 
@@ -275,21 +275,13 @@ impl cosmic::Application for AppModel {
         }
 
         let preview = crate::ui::preview(
-            if self.selecting {
-                None
-            } else {
-                self.handle.as_ref()
-            },
+            self.handle.as_ref(),
             self.result
                 .as_ref()
                 .map(|image| (image.width, image.height)),
             self.busy,
-            if self.selecting { "" } else { &self.status },
-            if self.selecting {
-                None
-            } else {
-                self.status_detail.as_deref()
-            },
+            &self.status,
+            self.status_detail.as_deref(),
         );
 
         if self.settings_open {
@@ -403,31 +395,12 @@ impl cosmic::Application for AppModel {
                 return self.open_preview();
             }
 
-            Message::Settings => {
-                if self.closing_preview.is_some() {
-                    return Task::none();
-                }
-
+            Message::Settings if self.preview.is_some() => {
                 self.settings_open = true;
-
-                let open = self.open_preview();
-
-                return if self.selecting {
-                    crate::overlay::close(self.overlay).chain(open)
-                } else {
-                    open
-                };
             }
 
             Message::Back => {
                 self.settings_open = false;
-
-                if self.selecting {
-                    if let Some(id) = self.preview.take() {
-                        self.closing_preview = Some(id);
-                        return window::close(id);
-                    }
-                }
             }
 
             Message::CloseRequested(id) if self.settings_open && self.preview == Some(id) => {
@@ -552,11 +525,6 @@ impl cosmic::Application for AppModel {
 
             Message::Closed(id) if self.closing_preview == Some(id) => {
                 self.closing_preview = None;
-
-                if self.selecting {
-                    self.overlay = window::Id::unique();
-                    return crate::overlay::open(self.overlay);
-                }
 
                 // Request the next screenshot only after the old preview is destroyed.
                 return self.restart_capture();

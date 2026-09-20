@@ -81,11 +81,6 @@ fn snipping_toolbar(status: &str) -> Element<'_, Message> {
         .push(widget::space().width(8))
         .push(widget::container(widget::divider::vertical::default()).height(24))
         .push(
-            widget::button::icon(icon("emblem-system-symbolic"))
-                .padding(10)
-                .on_press(Message::Settings),
-        )
-        .push(
             widget::button::icon(icon("window-close-symbolic"))
                 .padding(10)
                 .on_press(Message::Cancel),
