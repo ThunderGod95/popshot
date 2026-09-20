@@ -133,17 +133,8 @@ pub fn preview<'a>(
     ]))
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(preview_background)
+    .class(cosmic::theme::Container::WindowBackground)
     .into()
-}
-
-fn preview_background(theme: &Theme) -> widget::container::Style {
-    let mut style = cosmic::theme::Container::background(theme.cosmic(), false);
-
-    style.background = Some(theme.cosmic().background(false).component.base.into());
-    style.border = Border::default();
-
-    style
 }
 
 fn preview_actions(has_image: bool, busy: bool) -> Element<'static, Message> {
@@ -199,7 +190,6 @@ fn preview_canvas(handle: Option<&Handle>) -> Element<'static, Message> {
         .padding(8)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(preview_background)
         .into()
 }
 

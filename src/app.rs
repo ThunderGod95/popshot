@@ -71,16 +71,25 @@ impl AppModel {
             return self.focus_preview(id);
         }
 
-        let (id, task) = window::open(window::Settings {
-            size: iced::Size::new(1040.0, 720.0),
-            min_size: Some(iced::Size::new(560.0, 360.0)),
-            exit_on_close_request: false,
-            ..Default::default()
-        });
+        let (id, action) = cosmic::surface::action::app_window::<Self>(
+            |_| Default::default(),
+            |_| window::Settings {
+                size: iced::Size::new(1040.0, 720.0),
+                min_size: Some(iced::Size::new(560.0, 360.0)),
+                transparent: true,
+                exit_on_close_request: false,
+                platform_specific: window::settings::PlatformSpecific {
+                    application_id: crate::activation::APP_ID.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+        );
 
         self.preview = Some(id);
 
-        task.map(|id| cosmic::Action::App(Message::Opened(id)))
+        cosmic::surface::surface_task(action)
     }
 
     fn focus_preview(&mut self, id: window::Id) -> Task<cosmic::Action<Message>> {
@@ -301,6 +310,8 @@ impl cosmic::Application for AppModel {
         Subscription::batch([
             crate::activation::subscription(),
             iced::event::listen_with(|event, status, id| match event {
+                Event::Window(window::Event::Opened { .. }) => Some(Message::Opened(id)),
+
                 Event::Window(window::Event::Closed) => Some(Message::Closed(id)),
 
                 Event::Window(window::Event::CloseRequested) => Some(Message::CloseRequested(id)),
@@ -525,9 +536,9 @@ impl cosmic::Application for AppModel {
                 return iced::exit();
             }
 
-            Message::Opened(id) => {
+            Message::Opened(id) if self.preview == Some(id) => {
                 return self
-                    .set_window_title("Popshot — Snipping Tool".into(), id)
+                    .set_window_title("Popshot".into(), id)
                     .chain(self.focus_preview(id));
             }
 
