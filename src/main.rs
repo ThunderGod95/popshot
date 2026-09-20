@@ -4,6 +4,7 @@ mod activation;
 mod app;
 mod cache;
 mod capture;
+mod cli;
 mod clipboard;
 mod i18n;
 mod output_selection;
@@ -11,11 +12,22 @@ mod overlay;
 mod ui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let options = match cli::parse(std::env::args().skip(1)) {
+        Ok(Some(options)) => options,
+        Ok(None) => {
+            println!("{}", cli::HELP);
+            return Ok(());
+        }
+        Err(error) => {
+            eprintln!("popshot: {error}\nTry 'popshot --help'.");
+            std::process::exit(2);
+        }
+    };
+
     let runtime = tokio::runtime::Runtime::new()?;
 
-    let service = std::env::args().any(|arg| arg == "--gapplication-service");
-
-    let Some(connection) = runtime.block_on(activation::start(service))? else {
+    let Some(connection) = runtime.block_on(activation::start(options.service, options.mode))?
+    else {
         return Ok(());
     };
 

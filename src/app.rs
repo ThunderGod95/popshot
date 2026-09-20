@@ -19,6 +19,7 @@ pub struct AppModel {
     core: cosmic::Core,
     show_preview: bool,
     return_to_editor: bool,
+    capture_mode: Option<CaptureMode>,
     settings_open: bool,
     settings_error: Option<String>,
     pending_preview: Option<crate::activation::Request>,
@@ -129,7 +130,12 @@ impl AppModel {
 
                 let png = self.result.as_ref().unwrap().png.clone();
 
-                crate::overlay::close(self.overlay).chain(cosmic::task::future(async move {
+                let close = if self.capture_mode == Some(CaptureMode::Fullscreen) {
+                    Task::none()
+                } else {
+                    crate::overlay::close(self.overlay)
+                };
+                close.chain(cosmic::task::future(async move {
                     let result = async {
                         crate::clipboard::copy_png(&png).await?;
                         tokio::task::spawn_blocking(move || crate::cache::store(&png))
@@ -184,12 +190,17 @@ impl AppModel {
         })
     }
 
-    fn activate(&mut self, return_to_editor: bool) -> Task<cosmic::Action<Message>> {
+    fn activate(
+        &mut self,
+        return_to_editor: bool,
+        mode: Option<CaptureMode>,
+    ) -> Task<cosmic::Action<Message>> {
         if self.selecting || self.busy || self.settings_open || self.closing_preview.is_some() {
             return Task::none();
         }
 
         self.return_to_editor = return_to_editor;
+        self.capture_mode = mode;
 
         // Taking the ID also ignores repeat invocations while closing/capturing.
         let Some(id) = self.preview.take() else {
@@ -257,6 +268,7 @@ impl cosmic::Application for AppModel {
                 core,
                 show_preview,
                 return_to_editor: false,
+                capture_mode: None,
                 settings_open: false,
                 pending_preview: None,
                 activation_token: None,
@@ -286,7 +298,12 @@ impl cosmic::Application for AppModel {
             && self.selecting
             && let Some(handle) = &self.handle
         {
-            return crate::ui::selection(handle, self.dragging, &self.status);
+            return crate::ui::selection(
+                handle,
+                self.dragging,
+                &self.status,
+                self.capture_mode != Some(CaptureMode::Fullscreen),
+            );
         }
 
         let preview = crate::ui::preview(
@@ -356,10 +373,10 @@ impl cosmic::Application for AppModel {
 
                 self.activation_token = request.token;
 
-                return self.activate(false);
+                return self.activate(false, request.mode);
             }
 
-            Message::NewSnip if self.preview.is_some() => return self.activate(true),
+            Message::NewSnip if self.preview.is_some() => return self.activate(true, None),
 
             Message::Prepared(Ok(id)) => {
                 self.busy = false;
@@ -470,6 +487,10 @@ impl cosmic::Application for AppModel {
                 ));
                 self.source = Some(image);
                 self.selecting = true;
+
+                if self.capture_mode == Some(CaptureMode::Fullscreen) {
+                    return self.finish(None);
+                }
 
                 return crate::overlay::open(self.overlay);
             }

@@ -3,6 +3,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+use crate::output_selection::CaptureMode;
 use cosmic::iced::{Subscription, futures::StreamExt};
 use tokio::sync::mpsc;
 use zbus::{Connection, fdo, zvariant::OwnedValue};
@@ -14,6 +15,7 @@ static REQUESTS: OnceLock<Mutex<Option<mpsc::Receiver<Request>>>> = OnceLock::ne
 #[derive(Debug, Clone)]
 pub struct Request {
     pub capture_id: Option<String>,
+    pub mode: Option<CaptureMode>,
     pub token: Option<String>,
 }
 
@@ -22,7 +24,7 @@ struct Application(mpsc::Sender<Request>);
 #[zbus::interface(name = "org.freedesktop.Application")]
 impl Application {
     async fn activate(&self, platform_data: HashMap<String, OwnedValue>) -> fdo::Result<()> {
-        self.send(None, platform_data).await
+        self.send(None, None, platform_data).await
     }
 
     async fn activate_action(
@@ -31,6 +33,21 @@ impl Application {
         parameter: Vec<OwnedValue>,
         platform_data: HashMap<String, OwnedValue>,
     ) -> fdo::Result<()> {
+        let mode = match action_name {
+            "area" => Some(CaptureMode::Rectangle),
+            "fullscreen" => Some(CaptureMode::Fullscreen),
+            _ => None,
+        };
+
+        if let Some(mode) = mode {
+            if !parameter.is_empty() {
+                return Err(fdo::Error::InvalidArgs(
+                    "Capture actions take no parameters".into(),
+                ));
+            }
+            return self.send(None, Some(mode), platform_data).await;
+        }
+
         if action_name != "preview" || parameter.len() != 1 {
             return Err(fdo::Error::InvalidArgs(
                 "Expected preview with one capture ID".into(),
@@ -44,7 +61,7 @@ impl Application {
             return Err(fdo::Error::InvalidArgs("Invalid capture ID".into()));
         }
 
-        self.send(Some(id.into()), platform_data).await
+        self.send(Some(id.into()), None, platform_data).await
     }
 }
 
@@ -52,6 +69,7 @@ impl Application {
     async fn send(
         &self,
         capture_id: Option<String>,
+        mode: Option<CaptureMode>,
         data: HashMap<String, OwnedValue>,
     ) -> fdo::Result<()> {
         let token = data
@@ -60,14 +78,18 @@ impl Application {
             .map(str::to_owned);
 
         self.0
-            .send(Request { capture_id, token })
+            .send(Request {
+                capture_id,
+                mode,
+                token,
+            })
             .await
             .map_err(|_| fdo::Error::Failed("Application is closing".into()))
     }
 }
 
 /// Own the standard application name before starting the UI; never auto-start ourselves.
-pub async fn start(service: bool) -> zbus::Result<Option<Connection>> {
+pub async fn start(service: bool, mode: Option<CaptureMode>) -> zbus::Result<Option<Connection>> {
     let (sender, receiver) = mpsc::channel(32);
 
     let connection = Connection::session().await?;
@@ -91,7 +113,19 @@ pub async fn start(service: bool) -> zbus::Result<Option<Connection>> {
                 data.insert("activation-token", token.into());
             }
 
-            proxy.call::<_, _, ()>("Activate", &(data,)).await?;
+            if let Some(mode) = mode {
+                let action = match mode {
+                    CaptureMode::Rectangle => "area",
+                    CaptureMode::Fullscreen => "fullscreen",
+                    _ => unreachable!("not a CLI mode"),
+                };
+                let parameters: Vec<OwnedValue> = Vec::new();
+                proxy
+                    .call::<_, _, ()>("ActivateAction", &(action, parameters, data))
+                    .await?;
+            } else {
+                proxy.call::<_, _, ()>("Activate", &(data,)).await?;
+            }
         }
 
         return Ok(None);
@@ -107,6 +141,7 @@ pub async fn start(service: bool) -> zbus::Result<Option<Connection>> {
         sender
             .send(Request {
                 capture_id: None,
+                mode,
                 token: std::env::var("XDG_ACTIVATION_TOKEN").ok(),
             })
             .await

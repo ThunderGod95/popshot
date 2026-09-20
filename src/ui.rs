@@ -32,17 +32,25 @@ fn floating_surface(theme: &Theme) -> widget::container::Style {
     style
 }
 
-pub fn selection<'a>(handle: &Handle, dragging: bool, status: &'a str) -> Element<'a, Message> {
+pub fn selection<'a>(
+    handle: &Handle,
+    dragging: bool,
+    status: &'a str,
+    show_toolbar: bool,
+) -> Element<'a, Message> {
     let screenshot = widget::image(handle.clone())
         .width(Length::Fill)
         .height(Length::Fill)
         .content_fit(ContentFit::Fill);
+
     let selector = Element::new(OutputSelection {
         on_select: Message::Select,
         on_drag: Message::Drag,
     });
+
     let mut layers = vec![screenshot.into(), selector];
-    if !dragging {
+
+    if !dragging && show_toolbar {
         layers.push(
             widget::container(snipping_toolbar(status))
                 .center_x(Length::Fill)
@@ -50,6 +58,7 @@ pub fn selection<'a>(handle: &Handle, dragging: bool, status: &'a str) -> Elemen
                 .into(),
         );
     }
+
     Stack::with_children(layers)
         .width(Length::Fill)
         .height(Length::Fill)
