@@ -288,8 +288,8 @@ pub fn settings<'a>(
     error: Option<&'a str>,
 ) -> Element<'a, Message> {
     let capture = widget::settings::section().title("Capture").add(
-        widget::settings::item::builder("Show preview after capture")
-            .description("Open the screenshot to review or save it. When off, show a notification after copying it to the clipboard.")
+        widget::settings::item::builder("Automatically open preview")
+            .description("Open the preview after each capture. When off, screenshots are copied to the clipboard and a notification lets you open the preview when needed.")
             .toggler(show_preview, Message::ShowPreview),
     );
 

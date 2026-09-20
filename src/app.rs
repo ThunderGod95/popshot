@@ -182,6 +182,7 @@ impl AppModel {
         let Some(id) = self.preview.take() else {
             return self.restart_capture();
         };
+
         self.closing_preview = Some(id);
 
         window::close(id)
@@ -233,7 +234,7 @@ impl cosmic::Application for AppModel {
             .as_ref()
             .ok()
             .and_then(|config| config.get("show_preview").ok())
-            .unwrap_or(true);
+            .unwrap_or(false);
         let settings_error = config
             .err()
             .map(|error| format!("Couldn’t load settings: {error}"));
