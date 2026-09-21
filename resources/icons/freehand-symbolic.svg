@@ -1,0 +1,16 @@
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+>
+    <title>freehand icon</title>
+  <path
+        d="M8 17C3 16 2 12 4 8C6 4 11 3 16 5C21 7 22 12 18 15C15 18 9 19 7 16C5 13 9 12 10 15C12 19 8 22 5 21"
+        fill="none"
+        stroke="#000"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+    />
+</svg>

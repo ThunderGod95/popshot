@@ -1,6 +1,6 @@
 use crate::{
     capture::{self, CapturedImage},
-    output_selection::CaptureMode,
+    output_selection::{CaptureMode, Selection},
 };
 use cosmic::{
     cosmic_config::{Config, ConfigGet, ConfigSet},
@@ -41,7 +41,7 @@ pub struct AppModel {
 pub enum Message {
     Captured(Result<CapturedImage, String>),
     Mode(CaptureMode),
-    Select([f32; 4]),
+    Select(Selection),
     Drag(bool),
     Copy,
     NewSnip,
@@ -100,7 +100,7 @@ impl AppModel {
         window::gain_focus(id)
     }
 
-    fn finish(&mut self, region: Option<[f32; 4]>) -> Task<cosmic::Action<Message>> {
+    fn finish(&mut self, region: Option<Selection>) -> Task<cosmic::Action<Message>> {
         if !self.selecting {
             return Task::none();
         }
@@ -110,7 +110,7 @@ impl AppModel {
         };
 
         let result = match region {
-            Some(region) => capture::crop(source, region),
+            Some(region) => capture::crop(source, &region),
             None => Ok(source.clone()),
         };
 
@@ -125,7 +125,6 @@ impl AppModel {
                 self.source = None;
                 self.selecting = false;
                 self.status = "Copying screenshot…".into();
-
                 self.busy = true;
 
                 let png = self.result.as_ref().unwrap().png.clone();
@@ -135,6 +134,7 @@ impl AppModel {
                 } else {
                     crate::overlay::close(self.overlay)
                 };
+
                 close.chain(cosmic::task::future(async move {
                     let result = async {
                         crate::clipboard::copy_png(&png).await?;
@@ -302,7 +302,7 @@ impl cosmic::Application for AppModel {
                 handle,
                 self.dragging,
                 &self.status,
-                self.capture_mode != Some(CaptureMode::Fullscreen),
+                self.capture_mode.unwrap_or(CaptureMode::Rectangle),
             );
         }
 
@@ -346,6 +346,7 @@ impl cosmic::Application for AppModel {
                     "c" if modifiers.control() => Some(Message::Copy),
                     "s" if modifiers.control() => Some(Message::Save),
                     "r" if !modifiers.control() => Some(Message::Mode(CaptureMode::Rectangle)),
+                    "l" if !modifiers.control() => Some(Message::Mode(CaptureMode::Freehand)),
                     "f" if !modifiers.control() => Some(Message::Mode(CaptureMode::Fullscreen)),
                     _ => None,
                 },
@@ -504,6 +505,11 @@ impl cosmic::Application for AppModel {
             }
 
             Message::Mode(CaptureMode::Fullscreen) if !self.dragging => return self.finish(None),
+
+            Message::Mode(mode) if self.selecting && !self.dragging => {
+                self.capture_mode = Some(mode);
+                self.status.clear();
+            }
 
             Message::Select(region) => return self.finish(Some(region)),
 

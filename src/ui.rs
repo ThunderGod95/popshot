@@ -6,7 +6,9 @@ use cosmic::{
 
 use crate::{
     app::Message,
-    output_selection::{CaptureMode, OutputSelection},
+    output_selection::{
+        CaptureMode, Selection, freehand::FreehandSelection, rectangle::RectangleSelection,
+    },
 };
 
 fn icon(name: &'static str) -> widget::icon::Handle {
@@ -36,23 +38,29 @@ pub fn selection<'a>(
     handle: &Handle,
     dragging: bool,
     status: &'a str,
-    show_toolbar: bool,
+    mode: CaptureMode,
 ) -> Element<'a, Message> {
     let screenshot = widget::image(handle.clone())
         .width(Length::Fill)
         .height(Length::Fill)
         .content_fit(ContentFit::Fill);
 
-    let selector = Element::new(OutputSelection {
-        on_select: Message::Select,
-        on_drag: Message::Drag,
-    });
+    let selector = match mode {
+        CaptureMode::Freehand => Element::new(FreehandSelection {
+            on_select: |points| Message::Select(Selection::Freehand(points)),
+            on_drag: Message::Drag,
+        }),
+        _ => Element::new(RectangleSelection {
+            on_select: |bounds| Message::Select(Selection::Rectangle(bounds)),
+            on_drag: Message::Drag,
+        }),
+    };
 
     let mut layers = vec![screenshot.into(), selector];
 
-    if !dragging && show_toolbar {
+    if !dragging {
         layers.push(
-            widget::container(snipping_toolbar(status))
+            widget::container(snipping_toolbar(status, mode))
                 .center_x(Length::Fill)
                 .padding(24)
                 .into(),
@@ -65,20 +73,23 @@ pub fn selection<'a>(
         .into()
 }
 
-fn snipping_toolbar(status: &str) -> Element<'_, Message> {
+fn snipping_toolbar(status: &str, selected: CaptureMode) -> Element<'_, Message> {
     let mut modes = widget::row([]).spacing(6).align_y(Alignment::Center);
 
-    for mode in CaptureMode::ALL.into_iter().filter(|mode| mode.available()) {
+    for mode in CaptureMode::ALL {
         let symbol = match mode {
-            CaptureMode::Rectangle => "screenshot-selection-symbolic",
-            CaptureMode::Fullscreen => "screenshot-screen-symbolic",
-            _ => continue,
+            CaptureMode::Rectangle => icon("screenshot-selection-symbolic"),
+            CaptureMode::Fullscreen => icon("screenshot-screen-symbolic"),
+            CaptureMode::Freehand => widget::icon::from_svg_bytes(
+                include_bytes!("../resources/icons/freehand-symbolic.svg").as_slice(),
+            )
+            .symbolic(true),
         };
 
-        let button = widget::button::icon(icon(symbol))
+        let button = widget::button::icon(symbol)
             .label(mode.label())
-            .selected(mode == CaptureMode::Rectangle)
-            .class(if mode == CaptureMode::Rectangle {
+            .selected(mode == selected)
+            .class(if mode == selected {
                 cosmic::theme::Button::Suggested
             } else {
                 cosmic::theme::Button::Icon

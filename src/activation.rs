@@ -35,6 +35,7 @@ impl Application {
     ) -> fdo::Result<()> {
         let mode = match action_name {
             "area" => Some(CaptureMode::Rectangle),
+            "freehand" => Some(CaptureMode::Freehand),
             "fullscreen" => Some(CaptureMode::Fullscreen),
             _ => None,
         };
@@ -116,10 +117,12 @@ pub async fn start(service: bool, mode: Option<CaptureMode>) -> zbus::Result<Opt
             if let Some(mode) = mode {
                 let action = match mode {
                     CaptureMode::Rectangle => "area",
+                    CaptureMode::Freehand => "freehand",
                     CaptureMode::Fullscreen => "fullscreen",
-                    _ => unreachable!("not a CLI mode"),
                 };
+
                 let parameters: Vec<OwnedValue> = Vec::new();
+
                 proxy
                     .call::<_, _, ()>("ActivateAction", &(action, parameters, data))
                     .await?;

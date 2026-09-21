@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::output_selection::{Selection, freehand};
 use ashpd::desktop::{notification::DisplayHint, screenshot::Screenshot};
 use image::ImageFormat;
 
@@ -61,8 +62,13 @@ pub fn decode(png: Vec<u8>) -> Result<CapturedImage, String> {
     })
 }
 
-/// All selectors produce image-space bounds; freehand can additionally apply a mask here.
-pub fn crop(source: &CapturedImage, region: [f32; 4]) -> Result<CapturedImage, String> {
+/// Crop to the selection bounds, preserving transparency for a freehand selection.
+pub fn crop(source: &CapturedImage, selection: &Selection) -> Result<CapturedImage, String> {
+    let region = match selection {
+        Selection::Rectangle(region) => *region,
+        Selection::Freehand(points) => freehand::bounds(points)?,
+    };
+
     if region
         .iter()
         .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
@@ -83,7 +89,12 @@ pub fn crop(source: &CapturedImage, region: [f32; 4]) -> Result<CapturedImage, S
 
     let image = image::RgbaImage::from_raw(source.width, source.height, source.rgba.to_vec())
         .ok_or("Invalid screenshot pixels")?;
-    let image = image::imageops::crop_imm(&image, x, y, right - x, bottom - y).to_image();
+    let mut image = image::imageops::crop_imm(&image, x, y, right - x, bottom - y).to_image();
+
+    if let Selection::Freehand(points) = selection {
+        freehand::mask(&mut image, points, [x, y], [source.width, source.height])?;
+    }
+
     let mut png = std::io::Cursor::new(Vec::new());
 
     image
