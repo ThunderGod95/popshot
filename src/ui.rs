@@ -273,13 +273,35 @@ fn settings_button() -> Element<'static, Message> {
 pub fn settings<'a>(
     preview: Element<'a, Message>,
     show_preview: bool,
+    copy_on_capture: bool,
+    auto_save: bool,
+    save_location: &'a str,
+    show_notification: bool,
     error: Option<&'a str>,
 ) -> Element<'a, Message> {
-    let capture = widget::settings::section().title("Capture").add(
-        widget::settings::item::builder("Automatically open preview")
-            .description("Open the preview after each capture. When off, screenshots are copied to the clipboard and a notification lets you open the preview when needed.")
-            .toggler(show_preview, Message::ShowPreview),
-    );
+    let capture = widget::settings::section()
+        .title("Capture behavior")
+        .add(
+            widget::settings::item::builder("Copy screenshots to clipboard")
+                .toggler(copy_on_capture, Message::CopyOnCapture),
+        )
+        .add(
+            widget::settings::item::builder("Automatically save screenshots")
+                .toggler(auto_save, Message::AutoSave),
+        )
+        .add(
+            widget::settings::item::builder("Save location")
+                .description(save_location)
+                .control(widget::button::standard("Choose…").on_press(Message::ChooseSaveLocation)),
+        )
+        .add(
+            widget::settings::item::builder("Show notification after capture")
+                .toggler(show_notification, Message::ShowNotification),
+        )
+        .add(
+            widget::settings::item::builder("Open editor after capture")
+                .toggler(show_preview, Message::ShowPreview),
+        );
 
     let mut content = widget::column([capture.into()]).spacing(24);
 

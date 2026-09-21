@@ -1,4 +1,4 @@
-app-title = Popshot
+app-title = PopShot
 app-comment = Screenshot utility for CosmicDE.
 app-keywords =
 about = About

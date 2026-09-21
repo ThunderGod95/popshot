@@ -18,6 +18,10 @@ pub struct Flags;
 pub struct AppModel {
     core: cosmic::Core,
     show_preview: bool,
+    copy_on_capture: bool,
+    auto_save: bool,
+    save_location: String,
+    show_notification: bool,
     return_to_editor: bool,
     capture_mode: Option<CaptureMode>,
     settings_open: bool,
@@ -50,10 +54,15 @@ pub enum Message {
     Settings,
     Back,
     ShowPreview(bool),
+    CopyOnCapture(bool),
+    AutoSave(bool),
+    ShowNotification(bool),
+    ChooseSaveLocation,
+    SaveLocation(Result<Option<String>, String>),
     Notified(Result<(), String>),
     Activated(crate::activation::Request),
     PreviewLoaded(Result<CapturedImage, String>),
-    Prepared(Result<String, String>),
+    Prepared(Result<(Option<String>, String), String>),
     CloseRequested(window::Id),
     Cancel,
     Opened(window::Id),
@@ -124,7 +133,7 @@ impl AppModel {
                 self.result = Some(image);
                 self.source = None;
                 self.selecting = false;
-                self.status = "Copying screenshot…".into();
+                self.status = "Finishing capture…".into();
                 self.busy = true;
 
                 let png = self.result.as_ref().unwrap().png.clone();
@@ -135,14 +144,57 @@ impl AppModel {
                     crate::overlay::close(self.overlay)
                 };
 
+                let copy = self.copy_on_capture;
+                let folder = self.auto_save.then(|| self.save_location.clone());
+                let notify = self.show_notification;
+
                 close.chain(cosmic::task::future(async move {
-                    let result = async {
-                        crate::clipboard::copy_png(&png).await?;
-                        tokio::task::spawn_blocking(move || crate::cache::store(&png))
-                            .await
-                            .map_err(|e| e.to_string())?
+                    let mut errors = Vec::new();
+                    let mut status = Vec::new();
+
+                    if copy {
+                        match crate::clipboard::copy_png(&png).await {
+                            Ok(()) => status.push("Copied to clipboard".to_string()),
+                            Err(error) => errors.push(error),
+                        }
                     }
-                    .await;
+
+                    if let Some(folder) = folder {
+                        match capture::auto_save(&png, std::path::Path::new(&folder)).await {
+                            Ok(path) => status.push(format!("Saved to {}", path.display())),
+                            Err(error) => errors.push(error),
+                        }
+                    }
+
+                    let mut id = None;
+
+                    if notify {
+                        match tokio::task::spawn_blocking(move || crate::cache::store(&png))
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|result| result)
+                        {
+                            Ok(capture_id) => id = Some(capture_id),
+                            Err(error) => errors.push(error),
+                        }
+                    }
+
+                    let result = if errors.is_empty() {
+                        Ok((
+                            id,
+                            if status.is_empty() {
+                                "Screenshot captured".into()
+                            } else {
+                                status.join(". ")
+                            },
+                        ))
+                    } else {
+                        Err(status
+                            .into_iter()
+                            .chain(errors)
+                            .collect::<Vec<_>>()
+                            .join(". "))
+                    };
 
                     cosmic::Action::App(Message::Prepared(result))
                 }))
@@ -259,6 +311,26 @@ impl cosmic::Application for AppModel {
             .ok()
             .and_then(|config| config.get("show_preview").ok())
             .unwrap_or(false);
+        let copy_on_capture = config
+            .as_ref()
+            .ok()
+            .and_then(|c| c.get("copy_on_capture").ok())
+            .unwrap_or(true);
+        let auto_save = config
+            .as_ref()
+            .ok()
+            .and_then(|c| c.get("auto_save").ok())
+            .unwrap_or(false);
+        let show_notification = config
+            .as_ref()
+            .ok()
+            .and_then(|c| c.get("show_notification").ok())
+            .unwrap_or(true);
+        let save_location = config
+            .as_ref()
+            .ok()
+            .and_then(|c| c.get("save_location").ok())
+            .unwrap_or_else(capture::default_save_location);
         let settings_error = config
             .err()
             .map(|error| format!("Couldn’t load settings: {error}"));
@@ -267,6 +339,10 @@ impl cosmic::Application for AppModel {
             Self {
                 core,
                 show_preview,
+                copy_on_capture,
+                auto_save,
+                save_location,
+                show_notification,
                 return_to_editor: false,
                 capture_mode: None,
                 settings_open: false,
@@ -317,7 +393,15 @@ impl cosmic::Application for AppModel {
         );
 
         if self.settings_open {
-            crate::ui::settings(preview, self.show_preview, self.settings_error.as_deref())
+            crate::ui::settings(
+                preview,
+                self.show_preview,
+                self.copy_on_capture,
+                self.auto_save,
+                &self.save_location,
+                self.show_notification,
+                self.settings_error.as_deref(),
+            )
         } else {
             preview
         }
@@ -379,21 +463,47 @@ impl cosmic::Application for AppModel {
 
             Message::NewSnip if self.preview.is_some() => return self.activate(true, None),
 
-            Message::Prepared(Ok(id)) => {
+            Message::Prepared(Ok((id, status))) => {
                 self.busy = false;
-                self.status = "Copied to clipboard".into();
+                self.status = status;
+                self.status_detail = None;
 
-                if (self.show_preview || self.return_to_editor) && self.pending_preview.is_none() {
-                    return self.open_preview();
+                // Keep an otherwise discarded screenshot available for manual saving.
+                let editor = if self.pending_preview.is_none()
+                    && (self.show_preview
+                        || self.return_to_editor
+                        || (!self.copy_on_capture && !self.auto_save && !self.show_notification))
+                {
+                    self.open_preview()
+                } else {
+                    Task::none()
+                };
+
+                if let Some(id) = id {
+                    self.busy = true;
+
+                    let image = self.result.clone().expect("capture prepared");
+                    let status = self.status.clone();
+
+                    return Task::batch([
+                        editor,
+                        cosmic::task::future(async move {
+                            cosmic::Action::App(Message::Notified(
+                                capture::notify(&image, &id, &status).await,
+                            ))
+                        }),
+                    ]);
                 }
 
-                self.busy = true;
+                if let Some(request) = self.pending_preview.take() {
+                    return self.load_preview(request);
+                }
 
-                let image = self.result.clone().expect("capture prepared");
-
-                return cosmic::task::future(async move {
-                    cosmic::Action::App(Message::Notified(capture::notify(&image, &id).await))
-                });
+                return if self.preview.is_some() {
+                    editor
+                } else {
+                    iced::exit()
+                };
             }
 
             Message::Prepared(Err(error)) => {
@@ -444,36 +554,73 @@ impl cosmic::Application for AppModel {
                 return self.update(Message::Back);
             }
 
-            Message::ShowPreview(value) => {
-                match Config::new(Self::APP_ID, 1)
-                    .and_then(|config| config.set("show_preview", value))
-                {
+            Message::ShowPreview(value)
+            | Message::CopyOnCapture(value)
+            | Message::AutoSave(value)
+            | Message::ShowNotification(value) => {
+                let (key, setting) = match message {
+                    Message::ShowPreview(_) => ("show_preview", &mut self.show_preview),
+                    Message::CopyOnCapture(_) => ("copy_on_capture", &mut self.copy_on_capture),
+                    Message::AutoSave(_) => ("auto_save", &mut self.auto_save),
+                    _ => ("show_notification", &mut self.show_notification),
+                };
+                match Config::new(Self::APP_ID, 1).and_then(|config| config.set(key, value)) {
                     Ok(()) => {
-                        self.show_preview = value;
+                        *setting = value;
                         self.settings_error = None;
                     }
-
                     Err(error) => {
                         self.settings_error = Some(format!("Couldn’t save settings: {error}"))
                     }
                 }
             }
 
+            Message::ChooseSaveLocation if !self.busy => {
+                self.busy = true;
+                return cosmic::task::future(async {
+                    cosmic::Action::App(Message::SaveLocation(
+                        capture::choose_save_location().await,
+                    ))
+                });
+            }
+
+            Message::SaveLocation(result) => {
+                self.busy = false;
+                match result {
+                    Ok(Some(path)) => match Config::new(Self::APP_ID, 1)
+                        .and_then(|config| config.set("save_location", path.clone()))
+                    {
+                        Ok(()) => {
+                            self.save_location = path;
+                            self.settings_error = None;
+                        }
+                        Err(error) => {
+                            self.settings_error = Some(format!("Couldn’t save settings: {error}"))
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(error) => self.settings_error = Some(error),
+                }
+            }
+
             Message::Notified(Ok(())) => {
                 self.busy = false;
-                self.status = "Copied to clipboard".into();
                 self.status_detail = None;
 
                 if let Some(request) = self.pending_preview.take() {
                     return self.load_preview(request);
                 }
 
-                return iced::exit();
+                return if self.preview.is_some() {
+                    Task::none()
+                } else {
+                    iced::exit()
+                };
             }
 
             Message::Notified(Err(error)) => {
                 self.busy = false;
-                self.status = "Copied to clipboard, but couldn’t show a notification.".into();
+                self.status.push_str(". Couldn’t show a notification.");
                 self.status_detail = Some(error);
 
                 return self.open_preview();
@@ -565,7 +712,7 @@ impl cosmic::Application for AppModel {
 
             Message::Opened(id) if self.preview == Some(id) => {
                 return self
-                    .set_window_title("Popshot".into(), id)
+                    .set_window_title("PopShot".into(), id)
                     .chain(self.focus_preview(id));
             }
 

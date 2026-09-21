@@ -165,6 +165,98 @@ pub async fn save(png: &[u8]) -> Result<String, String> {
     Ok(format!("Saved to {}", path.display()))
 }
 
+pub fn default_save_location() -> String {
+    let pictures = std::process::Command::new("xdg-user-dir")
+        .arg("PICTURES")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|path| std::path::PathBuf::from(path.trim()))
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Pictures"))
+        });
+    pictures
+        .map(|path| path.join("Screenshots").to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+pub async fn choose_save_location() -> Result<Option<String>, String> {
+    let request = ashpd::desktop::file_chooser::SelectedFiles::open_file()
+        .title("Choose screenshot save location")
+        .directory(true)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let response = match request.response() {
+        Ok(response) => response,
+        Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+
+    let uri = response.uris().first().ok_or("No folder selected")?;
+
+    let path = url::Url::parse(uri.as_str())
+        .map_err(|_| "Choose a local folder")?
+        .to_file_path()
+        .map_err(|_| "Choose a local folder")?;
+
+    let path = path.to_str().ok_or("Folder path is not valid UTF-8")?;
+
+    Ok(Some(path.to_owned()))
+}
+
+pub async fn auto_save(png: &[u8], folder: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    use tokio::io::AsyncWriteExt;
+
+    if !folder.is_absolute() {
+        return Err("Choose an absolute save location in Settings".into());
+    }
+
+    let result = async {
+        tokio::fs::create_dir_all(folder).await?;
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let path = folder.join(format!(
+            "Screenshot-{timestamp}-{}.png",
+            uuid::Uuid::new_v4()
+        ));
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .await?;
+
+        if let Err(error) = async {
+            file.write_all(png).await?;
+            file.sync_all().await
+        }
+        .await
+        {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(error);
+        }
+
+        Ok::<_, std::io::Error>(path)
+    }
+    .await;
+
+    result.map_err(|error| {
+        format!(
+            "Could not automatically save screenshot in {}: {error}",
+            folder.display()
+        )
+    })
+}
+
 fn notification_thumbnail(image: &CapturedImage) -> Result<Vec<u8>, String> {
     let pixels = image::RgbaImage::from_raw(image.width, image.height, image.rgba.to_vec())
         .ok_or("Invalid screenshot pixels")?;
@@ -189,7 +281,7 @@ fn notification_thumbnail(image: &CapturedImage) -> Result<Vec<u8>, String> {
     Ok(png.into_inner())
 }
 
-pub async fn notify(image: &CapturedImage, capture_id: &str) -> Result<(), String> {
+pub async fn notify(image: &CapturedImage, capture_id: &str, status: &str) -> Result<(), String> {
     use ashpd::desktop::{Icon, notification::Notification};
 
     let portal = ashpd::desktop::notification::NotificationProxy::new()
@@ -200,10 +292,7 @@ pub async fn notify(image: &CapturedImage, capture_id: &str) -> Result<(), Strin
 
     let notification = || {
         let notification = Notification::new("Screenshot captured")
-            .body(
-                "Your screenshot has been copied to the clipboard. \
-                     Click to preview or save it.",
-            )
+            .body(format!("{status}. Click to open the editor.").as_str())
             .default_action("app.preview")
             .default_action_target(capture_id);
 

@@ -1,4 +1,4 @@
-# Popshot
+# PopShot
 
 Screenshot utility for CosmicDE.
 
